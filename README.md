@@ -1,0 +1,2 @@
+# cli
+InferencePort AI CLI
