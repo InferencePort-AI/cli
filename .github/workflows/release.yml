@@ -31,7 +31,7 @@ jobs:
         include:
           - { runner: windows-latest, target: windows-x64 }
           - { runner: windows-11-arm, target: windows-arm64 }
-          - { runner: macos-13, target: macos-x64 }
+          - { runner: macos-15-intel, target: macos-x64 }
           - { runner: macos-14, target: macos-arm64 }
           # Build on the oldest supported runner so the binary runs on older glibc systems too.
           - { runner: ubuntu-22.04, target: linux-x64 }

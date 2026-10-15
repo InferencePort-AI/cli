@@ -135,7 +135,7 @@ class ProxyServer:
         self.httpd: Optional[ThreadingHTTPServer] = None
 
     # -- lifecycle -----------------------------------------------------------
-    def serve(self) -> None:
+    def serve(self, on_ready=None) -> None:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -155,6 +155,8 @@ class ProxyServer:
         self.httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         self.httpd.daemon_threads = True
         self.log.line("INFO", f"Proxy server running on http://{self.host}:{self.port}")
+        if on_ready:
+            on_ready()  # listening now - safe to advertise (pid file etc.)
         try:
             self.httpd.serve_forever(poll_interval=0.5)
         finally:

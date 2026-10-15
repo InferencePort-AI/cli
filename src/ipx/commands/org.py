@@ -649,7 +649,7 @@ def usage() -> None:
 
 @usage.command("breakdown")
 @click.option("--days", type=click.IntRange(1, 365), default=30, show_default=True)
-@click.option("--by", type=click.Choice(["user", "model", "key", "modality"]), default="user", show_default=True)
+@click.option("--by", type=click.Choice(["user", "key", "model", "day"]), default="user", show_default=True)
 @pass_app
 def usage_breakdown(app: App, days: int, by: str) -> None:
     """Spend broken down by user, model, key or modality."""
@@ -719,7 +719,7 @@ def audit_export(app: App, fmt, action, actor, since, output) -> None:
 
 @audit.command("webhook", short_help="Stream audit events to a webhook")
 @click.option("--url", help="HTTPS endpoint (omit with --remove).")
-@click.option("--secret", help="Signing secret.")
+@click.option("--secret", help="Signing secret, 16-256 characters (required the first time).")
 @click.option("--remove", is_flag=True)
 @pass_app
 def audit_webhook(app: App, url, secret, remove) -> None:

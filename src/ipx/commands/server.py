@@ -62,9 +62,27 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+def healthy(d: Dict[str, Any]) -> bool:
+    """Does the recorded server answer /__health? Guards against a recycled PID."""
+    import http.client
+
+    host = d.get("host") or "127.0.0.1"
+    host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    try:
+        conn = http.client.HTTPConnection(host, int(d["port"]), timeout=1.5)
+        conn.request("GET", "/__health")
+        ok_ = conn.getresponse().status == 204
+        conn.close()
+        return ok_
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 def running() -> Optional[Dict[str, Any]]:
+    """The live server described by the pid file, or None. A stale pid file (crash, reused PID) is removed and
+    never acted on, so `stop` can only ever signal a process that really is our server."""
     d = read_pid()
-    if d and pid_alive(int(d["pid"])):
+    if d and pid_alive(int(d["pid"])) and healthy(d):
         return d
     if d:
         try:
@@ -170,8 +188,9 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
         keys.append(new_key)
     if not users and not keys:
         raise IpxError("Nobody would be able to connect.", "Add people with --allow EMAIL, or create a key with --generate-key.")
-    if users and not app.creds.signed_in:
-        raise IpxError("Verifying users requires you to be signed in.", "Run `ipx auth login`, or host with --generate-key / --api-key only.")
+    if users and app.creds.auth_type != "jwt":
+        raise IpxError("Verifying users requires a signed-in session (not an API key).",
+                       "Run `ipx auth login` with email or OAuth, or host with --generate-key / --api-key only.")
 
     if detach:
         env = dict(os.environ, IPX_SERVER_KEYS=",".join(keys), IPX_DETACHED="1")
@@ -185,23 +204,26 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
         else:
             kw["start_new_session"] = True
         proc = subprocess.Popen(args, **kw)
-        for _ in range(40):
+        for _ in range(60):
             time.sleep(0.25)
             if proc.poll() is not None:
                 raise IpxError("The server exited right after starting.", f"See `ipx server logs` ({log_path()}).")
             if running():
                 break
+        else:
+            raise IpxError("The server did not become ready in time.", f"See `ipx server logs` ({log_path()}).")
         _banner(app, host, port, users, keys, new_key, background=True)
         return
 
     srv = ProxyServer(host=host, port=port, ollama_url=app.cfg.ollama_url, users=users, api_keys=keys,
                       verifier=Verifier(app.cfg, app.creds) if users else None, echo=verbose)
-    pid_path().write_text(json.dumps({"pid": os.getpid(), "port": port, "host": host, "started": time.time(), "org": app.org}), encoding="utf-8")
+    def advertise() -> None:  # only once the port is bound, so a pid file always means "listening"
+        pid_path().write_text(json.dumps({"pid": os.getpid(), "port": port, "host": host, "started": time.time(), "org": app.org}), encoding="utf-8")
+
     try:
-        srv.httpd = None
         if not os.environ.get("IPX_DETACHED"):
             _banner(app, host, port, users, keys, new_key, background=False)
-        srv.serve()
+        srv.serve(on_ready=advertise)
     except OSError as e:
         raise IpxError(f"Could not listen on {host}:{port}: {e.strerror or e}", "Is another server (or the desktop app host mode) using this port?")
     except KeyboardInterrupt:
@@ -258,14 +280,7 @@ def stop(app: App) -> None:
 def status(app: App) -> None:
     """Is the server running, and is it healthy?"""
     d = running()
-    healthy = None
-    if d:
-        try:
-            with socket.create_connection(("127.0.0.1", int(d["port"])), timeout=1):
-                healthy = True
-        except OSError:
-            healthy = False
-    info = {"running": bool(d), **(d or {}), "healthy": healthy}
+    info = {"running": bool(d), **(d or {}), "healthy": True if d else None}
 
     def render(_: Any) -> None:
         if not d:
@@ -273,7 +288,7 @@ def status(app: App) -> None:
             return
         up = int(time.time() - float(d.get("started", time.time())))
         ui.console.print(ui.kv_panel("Host server", [
-            ("Status", Text("● running" if healthy else "● process up, port not answering", style="ok" if healthy else "warn")),
+            ("Status", Text("● running", style="ok")),
             ("PID", d["pid"]), ("Port", d.get("port")), ("Uptime", f"{up // 3600}h {up % 3600 // 60}m {up % 60}s"),
             ("Organization", d.get("org") or "personal"), ("Log", str(log_path()))]))
 

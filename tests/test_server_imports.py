@@ -229,3 +229,49 @@ def test_import_file_validates(ipx, home, tmp_path):
     good.write_text(json.dumps({"type": "website", "title": "T", "url": "https://t.example", "author": "", "emoji": "x", "background": "b", "sdk": "unknown", "short_description": ""}))
     ipx("import", "file", str(good))
     assert len(list((desktop_dir(home) / "websites").glob("*.import"))) == 1
+
+
+# ----------------------------------------------------------------- pid file safety
+
+
+def test_stale_pidfile_with_recycled_pid_is_never_acted_on(home):
+    """A pid file pointing at a live but unrelated process (our own pid, no server) must be discarded, not killed."""
+    import os
+
+    from ipx.commands import server as srvcmd
+
+    srvcmd.pid_path().write_text(json.dumps({"pid": os.getpid(), "port": 1, "host": "127.0.0.1", "started": time.time()}))
+    assert srvcmd.pid_alive(os.getpid())
+    assert srvcmd.running() is None
+    assert not srvcmd.pid_path().exists()
+
+
+def test_stop_with_stale_pidfile_kills_nothing(ipx, monkeypatch):
+    import os
+
+    from ipx.commands import server as srvcmd
+
+    srvcmd.pid_path().write_text(json.dumps({"pid": os.getpid(), "port": 1, "host": "0.0.0.0"}))
+    killed = []
+    monkeypatch.setattr(srvcmd, "kill", lambda pid: killed.append(pid))
+    r = ipx("server", "stop")
+    assert "No server is running" in r.output and killed == []
+
+
+def test_running_recognises_a_real_server(proxy, home):
+    import os
+
+    from ipx.commands import server as srvcmd
+
+    srvcmd.pid_path().write_text(json.dumps({"pid": os.getpid(), "port": proxy.port, "host": "0.0.0.0"}))
+    assert srvcmd.running()["port"] == proxy.port
+
+
+def test_user_verification_requires_a_user_session(ipx):
+    from ipx.config import Credentials
+
+    Credentials().store_api_key("ipa_live_x", email="svc@x.co")
+    ipx.ollama.route("GET", "/api/version", body={"version": "0.9"})
+    with pytest.raises(IpxError) as e:
+        ipx("server", "start", "--allow", "a@b.co")
+    assert "not an API key" in e.value.message

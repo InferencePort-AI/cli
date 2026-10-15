@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import threading
 from typing import Any, Dict, List, Optional
 
 import click
@@ -111,8 +112,18 @@ def login(app: App, email, password, password_stdin, api_key, provider, sso_emai
             ui.console.print(f"[muted]Opening your browser to sign in with {label}…[/muted]")
             ui.console.print(f"[muted]If it does not open, visit:[/muted]\n  [underline]{url}[/underline]\n")
 
-        with ui.status(f"Waiting for {label} sign-in in your browser… (Ctrl+C to cancel)"):
-            session = A.browser_login(app.cfg, build, open_browser=not no_browser, on_url=show)
+        def nudge() -> None:
+            ui.console.print("[muted]Still waiting. If the browser is on another machine or never returns here, press Ctrl+C and "
+                             "run again with --paste.[/muted]")
+
+        timer = threading.Timer(30.0, nudge)
+        timer.daemon = True
+        timer.start()
+        try:
+            with ui.status(f"Waiting for {label} sign-in in your browser… (Ctrl+C to cancel)"):
+                session = A.browser_login(app.cfg, build, open_browser=not no_browser, on_url=show)
+        finally:
+            timer.cancel()
     with ui.status("Finishing sign-in…"):
         user = A.complete_session(app.cfg, app.creds, session)
     _signed_in(app, user.get("email") or "your account", label)
