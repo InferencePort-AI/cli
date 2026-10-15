@@ -112,3 +112,39 @@ def test_expired_session_refreshes(ipx):
     ipx("--json", "auth", "status")
     assert ipx.fake.last("/subscription")["headers"]["authorization"] == "Bearer tok_pw"
     assert "grant_type=refresh_token" in ipx.fake.last("/sb/auth/v1/token")["query"]
+
+
+def test_browser_login_loopback_roundtrip(ipx):
+    """Simulate the hosted callback page handing the token fragment to the CLI's local listener."""
+    import http.client
+    import threading
+    import urllib.parse
+
+    from ipx import auth
+
+    captured = {}
+
+    def build(redirect_to):
+        captured["redirect_to"] = redirect_to
+        return "https://idp.example/authorize"
+
+    def drive(url):
+        rd = urllib.parse.parse_qs(urllib.parse.urlparse(captured["redirect_to"]).query)["rd"][0]
+        u = urllib.parse.urlparse(rd)
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+        conn.request("GET", "/callback")
+        page = conn.getresponse().read().decode()
+        nonce = page.split("/token?n=")[1].split("'")[0]
+        # a wrong nonce must be rejected
+        bad = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+        bad.request("POST", "/token?n=wrong", body="access_token=EVIL")
+        assert bad.getresponse().status == 403
+        ok = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+        ok.request("POST", f"/token?n={nonce}", body="access_token=AAA&refresh_token=BBB&expires_in=3600")
+        assert ok.getresponse().status == 200
+
+    session = auth.browser_login(
+        __import__("ipx.config", fromlist=["Config"]).Config(), build, open_browser=False,
+        on_url=lambda url: threading.Thread(target=drive, args=(url,), daemon=True).start(), timeout=10)
+    assert session["access_token"] == "AAA" and session["refresh_token"] == "BBB"
+    assert captured["redirect_to"].startswith("https://inference.js.org/authcallback.html?rd=http%3A%2F%2F127.0.0.1%3A")
