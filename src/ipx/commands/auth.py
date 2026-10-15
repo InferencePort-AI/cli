@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
-import time
 from typing import Any, Dict, List, Optional
 
 import click

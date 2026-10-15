@@ -11,7 +11,7 @@ from rich.text import Text
 
 from ipx import ui
 from ipx.app import App, org_path, pass_app
-from ipx.clickx import IpxCommand, IpxGroup
+from ipx.clickx import IpxGroup
 from ipx.errors import IpxError
 
 ROLES = ["admin", "billing_manager", "auditor", "member"]

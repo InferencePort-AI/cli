@@ -2,12 +2,10 @@ import http.client
 import json
 import threading
 import time
-import urllib.parse
 
 import pytest
 
 from ipx.errors import IpxError
-
 
 # ----------------------------------------------------------------- host proxy
 
@@ -156,6 +154,7 @@ def test_server_start_needs_someone_to_allow(ipx):
 
 def test_server_blocked_by_org_policy(ipx):
     from conftest import sign_in
+
     from ipx.config import Config
 
     sign_in(ipx)
@@ -177,7 +176,6 @@ def test_server_status_when_idle(ipx):
 
 
 def desktop_dir(home):
-    import sys
 
     from ipx.config import desktop_data_dir
 

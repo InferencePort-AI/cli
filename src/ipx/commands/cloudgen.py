@@ -7,7 +7,7 @@ for a request (wallet credits vs. subscription quota) and in a few extras (3D an
 from __future__ import annotations
 
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import click
 from rich.text import Text
@@ -15,7 +15,7 @@ from rich.text import Text
 from ipx import chat as chatmod
 from ipx import cloud, ui
 from ipx.app import App, pass_app
-from ipx.clickx import IpxCommand, IpxGroup
+from ipx.clickx import IpxGroup
 from ipx.cloud import GEN, P2G, Tier
 from ipx.errors import IpxError
 
@@ -30,7 +30,7 @@ def _read_prompt(prompt: Optional[str], what: str = "prompt") -> str:
         data = sys.stdin.read().strip()
         if data:
             return data
-    raise IpxError(f"No {what} given.", f"Pass it as an argument or pipe it in: echo \"…\" | ipx … -")
+    raise IpxError(f"No {what} given.", "Pass it as an argument or pipe it in: echo \"…\" | ipx … -")
 
 
 def _model_default(app: App, tier: Tier) -> Optional[str]:

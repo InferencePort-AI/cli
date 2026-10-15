@@ -1,9 +1,7 @@
 import base64
 import json
-import os
 
 import pytest
-
 from conftest import sign_in
 
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64

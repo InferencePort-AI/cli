@@ -102,7 +102,12 @@ def lan_ips() -> List[str]:
 def self_command() -> List[str]:
     """How to re-invoke this program (Nuitka binary, or `python -m ipx`)."""
     if "__compiled__" in globals() or getattr(sys, "frozen", False):
-        return [sys.argv[0] if os.path.isabs(sys.argv[0]) else os.path.abspath(sys.argv[0])]
+        import shutil
+
+        argv0 = sys.argv[0]
+        if os.path.dirname(argv0):
+            return [os.path.abspath(argv0)]
+        return [shutil.which(argv0) or sys.executable]  # launched through PATH
     return [sys.executable, "-m", "ipx"]
 
 

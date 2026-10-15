@@ -43,7 +43,17 @@ def root(ctx: click.Context, json_out: bool, org: Optional[str], personal: bool,
 
 def _register() -> None:
     from ipx.commands import (
-        auth, config_cmd, gen, imports, local, misc, model, org, p2g, server, usage,
+        auth,
+        config_cmd,
+        gen,
+        imports,
+        local,
+        misc,
+        model,
+        org,
+        p2g,
+        server,
+        usage,
     )
 
     for mod in (auth, org, usage, p2g, gen, model, local, server, imports, config_cmd, misc):
@@ -59,11 +69,42 @@ def _prepare_streams() -> None:
             pass
 
 
+_HOIST_FLAGS = {"--json", "--no-color", "--personal", "--yes", "-y", "--quiet"}
+_HOIST_VALUE = {"--org", "-O", "--base-url"}
+
+
+def hoist_globals(argv: list) -> list:
+    """Let global options appear anywhere (`ipx usage get --json`) by moving them in front of the command.
+
+    Everything after a literal `--` is left alone, and only unambiguous flags are hoisted (not `-q`, which
+    `ipx api` uses for query parameters).
+    """
+    front: list = []
+    rest: list = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            rest.extend(argv[i:])
+            break
+        if a in _HOIST_FLAGS:
+            front.append(a)
+        elif a in _HOIST_VALUE and i + 1 < len(argv):
+            front.extend([a, argv[i + 1]])
+            i += 1
+        elif a.split("=", 1)[0] in _HOIST_VALUE and "=" in a:
+            front.append(a)
+        else:
+            rest.append(a)
+        i += 1
+    return front + rest
+
+
 def main(argv: Optional[list] = None) -> None:
     _prepare_streams()
     _register()
     try:
-        root.main(args=argv, standalone_mode=False, prog_name="ipx")
+        root.main(args=hoist_globals(list(sys.argv[1:] if argv is None else argv)), standalone_mode=False, prog_name="ipx")
     except click.exceptions.Exit as e:
         sys.exit(e.exit_code)
     except click.Abort:

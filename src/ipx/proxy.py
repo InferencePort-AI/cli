@@ -25,8 +25,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from ipx.config import Config, Credentials, config_dir
-from ipx.http import raw_request
 from ipx.errors import ApiError, IpxError
+from ipx.http import raw_request
 
 MAX_BODY = 20 * 1024 * 1024
 MAX_LOG = 10 * 1024 * 1024

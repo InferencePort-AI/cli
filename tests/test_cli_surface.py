@@ -70,7 +70,9 @@ def test_config_roundtrip(ipx):
 def test_credentials_file_is_private(ipx):
     import os
     import sys
+
     from conftest import sign_in
+
     from ipx.config import Credentials
     sign_in(ipx)
     if sys.platform != "win32":
@@ -81,3 +83,13 @@ def test_client_id_is_valid_and_stable(home):
     from ipx.config import CLIENT_ID_RE, Config
     a = Config().client_id
     assert CLIENT_ID_RE.match(a) and Config().client_id == a
+
+
+def test_global_flags_can_follow_the_command():
+    from ipx.cli import hoist_globals
+    assert hoist_globals(["usage", "get", "--json"]) == ["--json", "usage", "get"]
+    assert hoist_globals(["org", "members", "list", "-O", "acme", "--yes"]) == ["-O", "acme", "--yes", "org", "members", "list"]
+    assert hoist_globals(["gen", "text", "--org=acme", "hi"]) == ["--org=acme", "gen", "text", "hi"]
+    # after `--` and for ambiguous short flags nothing moves
+    assert hoist_globals(["gen", "text", "--", "--json"]) == ["gen", "text", "--", "--json"]
+    assert hoist_globals(["api", "GET", "/x", "-q", "a=b"]) == ["api", "GET", "/x", "-q", "a=b"]

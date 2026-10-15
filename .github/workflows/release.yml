@@ -1,0 +1,134 @@
+name: Release
+
+# Push a tag like v0.2.0 to build native binaries on every platform, publish a GitHub release and ship them through
+# pip (PyPI), npm and cargo.  Secrets: NPM_TOKEN, CARGO_REGISTRY_TOKEN. PyPI uses trusted publishing (OIDC).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python packaging/check_versions.py "${GITHUB_REF_NAME#v}"
+      - run: python -m pip install -e ".[dev]" && python -m pytest
+
+  binaries:
+    name: Binary (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: windows-x64 }
+          - { runner: windows-11-arm, target: windows-arm64 }
+          - { runner: macos-13, target: macos-x64 }
+          - { runner: macos-14, target: macos-arm64 }
+          # Build on the oldest supported runner so the binary runs on older glibc systems too.
+          - { runner: ubuntu-22.04, target: linux-x64 }
+          - { runner: ubuntu-22.04-arm, target: linux-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Linux build dependencies
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y patchelf ccache
+      - run: python -m pip install -e ".[build]"
+      - run: python packaging/build_binary.py
+      - name: Smoke test the compiled binary
+        shell: bash
+        run: |
+          f=$(ls dist/ipx-* | grep -v sha256 | head -1)
+          "$f" --version
+          "$f" --help | head -5
+          "$f" model search coder --limit 1 --json >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipx-${{ matrix.target }}
+          path: dist/ipx-*
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Aggregate checksums
+        run: cd dist && sha256sum ipx-* | grep -v '\.sha256' > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  pypi:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build && python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: bins
+          merge-multiple: true
+      - name: Build and publish platform packages, then the launcher
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node packaging/npm/scripts/make-platform-packages.mjs "$VERSION" bins out
+          for d in out/*/; do (cd "$d" && npm publish --access public); done
+          cd packaging/npm/ipx
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npm publish --access public
+
+  crates:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish (build.rs downloads and verifies the release binary)
+        working-directory: packaging/cargo
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cp ../../LICENSE LICENSE
+          cp ../npm/ipx/README.md README.md
+          cargo publish --allow-dirty

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import copy as _copy
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import click
 from rich.text import Text
@@ -12,7 +13,6 @@ from rich.text import Text
 from ipx import policy, ui
 from ipx.app import App, pass_app
 from ipx.clickx import IpxGroup
-from ipx.errors import IpxError
 from ipx.local import Ollama
 
 
@@ -226,8 +226,6 @@ def import_hf(app: App, repo: str) -> None:
     ref = repo if repo.startswith("hf.co/") else f"hf.co/{repo}"
     _pull_one(app, client(app), ref)
 
-
-import copy as _copy
 
 _alias = _copy.copy(group)
 _alias.name = "models"

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import click
-from rich.console import Group
 from rich.text import Text
 
 from ipx import ui

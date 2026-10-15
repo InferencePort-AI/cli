@@ -1,8 +1,7 @@
-import json
 
 import pytest
-
 from conftest import sign_in
+
 from ipx.errors import ApiError, IpxError, NeedsOrg
 
 

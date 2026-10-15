@@ -1,0 +1,27 @@
+[package]
+name = "ipx-cli"
+version = "0.1.0"
+edition = "2021"
+description = "ipx - the InferencePort AI command line. A thin wrapper that embeds the native binary; no Python needed."
+license = "Apache-2.0"
+repository = "https://github.com/inferenceport-ai/cli"
+homepage = "https://inferenceport-ai.readthedocs.io"
+readme = "README.md"
+keywords = ["ai", "llm", "cli", "inferenceport", "ollama"]
+categories = ["command-line-utilities"]
+build = "build.rs"
+rust-version = "1.70"
+include = ["src/**", "build.rs", "Cargo.toml", "README.md", "LICENSE"]
+
+[[bin]]
+name = "ipx"
+path = "src/main.rs"
+
+[build-dependencies]
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
