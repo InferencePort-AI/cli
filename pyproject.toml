@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inferenceport-cli"
+dynamic = ["version"]
+description = "ipx - the InferencePort AI command line: cloud P2G, Lightning, organizations, local models and the desktop host server."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "InferencePort AI", email = "inferenceportai@gmail.com" }]
+keywords = ["ai", "llm", "inferenceport", "cli", "ollama", "generative"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "click>=8.1,<9",
+  "rich>=13.7",
+  "certifi>=2024.2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+build = ["nuitka>=2.5", "ordered-set", "zstandard"]
+
+[project.urls]
+Homepage = "https://inference.js.org"
+Documentation = "https://inferenceport-ai.readthedocs.io"
+Source = "https://github.com/inferenceport-ai/cli"
+
+[project.scripts]
+ipx = "ipx.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "ipx.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "I"]
+ignore = ["E701", "E702", "E731"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ipx"]
