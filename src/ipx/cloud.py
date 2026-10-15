@@ -205,6 +205,14 @@ def generate_images(app: App, tier: Tier, prompt: str, *, n: int, mode: Optional
 # --------------------------------------------------------------------------- video (async)
 
 
+def _interval(default: float) -> float:
+    """Polling interval; IPX_POLL_INTERVAL overrides it (used by tests)."""
+    try:
+        return float(os.environ.get("IPX_POLL_INTERVAL") or default)
+    except ValueError:
+        return default
+
+
 def _progress_fraction(v: Any) -> float:
     try:
         f = float(v)
@@ -233,6 +241,7 @@ def get_video(app: App, tier: Tier, video_id: str) -> Dict[str, Any]:
 
 def wait_video(app: App, tier: Tier, job: Dict[str, Any], *, interval: float = 5.0, timeout: float = 1800.0) -> Dict[str, Any]:
     vid = job["id"]
+    interval = _interval(interval)
     with ui.job_progress() as prog:
         task = prog.add_task(f"Rendering video {vid}", total=100)
 
@@ -312,7 +321,7 @@ def generate_3d(app: App, *, model: str, image: str, prompt: Optional[str], reso
         def fetch() -> Dict[str, Any]:
             return app.api.request("GET", f"/v1/3d/jobs/{job_id}").json() or {}
 
-        final = poll(fetch, done=lambda j: j.get("status") in ("completed", "failed"), interval=6.0, timeout=1800.0,
+        final = poll(fetch, done=lambda j: j.get("status") in ("completed", "failed"), interval=_interval(6.0), timeout=1800.0,
                      on_tick=lambda j: prog.update(task, description=f"{str(j.get('status', 'pending')).title()} · {job_id[:10]}…"))
         prog.update(task, total=1, completed=1)
     if final.get("status") == "failed":

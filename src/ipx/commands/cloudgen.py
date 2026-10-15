@@ -44,8 +44,12 @@ def build_group(tier: Tier) -> click.Group:
 
     @click.group(cmd, cls=IpxGroup, section=section,
                  short_help=f"{tier.title}: chat, image, video, audio{', 3D' if tier is P2G else ''} ({'credits' if tier is P2G else 'subscription'})")
-    def group() -> None:
-        pass
+    @click.pass_context
+    def group(ctx: click.Context) -> None:
+        if tier is GEN and ctx.invoked_subcommand:
+            from ipx import policy
+
+            policy.assert_cloud(ctx.obj)  # organizations can restrict members to local models
 
     group.help = (
         f"{tier.title} cloud generation, billed against {pay}.\n\n"

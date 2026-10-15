@@ -169,7 +169,7 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
         raise IpxError("Verifying users requires you to be signed in.", "Run `ipx auth login`, or host with --generate-key / --api-key only.")
 
     if detach:
-        env = dict(os.environ, IPX_SERVER_KEYS=",".join(keys))
+        env = dict(os.environ, IPX_SERVER_KEYS=",".join(keys), IPX_DETACHED="1")
         args = self_command() + ["--org", app.org] * bool(app.org) + ["--personal"] * bool(app.personal) + ["server", "start", "--port", str(port), "--host", host]
         for u in users:
             args += ["--allow", f"{u['email']}:{u['role']}"]
@@ -194,7 +194,8 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
     pid_path().write_text(json.dumps({"pid": os.getpid(), "port": port, "host": host, "started": time.time(), "org": app.org}), encoding="utf-8")
     try:
         srv.httpd = None
-        _banner(app, host, port, users, keys, new_key, background=False)
+        if not os.environ.get("IPX_DETACHED"):
+            _banner(app, host, port, users, keys, new_key, background=False)
         srv.serve()
     except OSError as e:
         raise IpxError(f"Could not listen on {host}:{port}: {e.strerror or e}", "Is another server (or the desktop app host mode) using this port?")
