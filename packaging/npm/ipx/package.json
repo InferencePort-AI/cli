@@ -1,6 +1,6 @@
 {
   "name": "@inferenceport-ai/ipx",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "ipx - the InferencePort AI command line (cloud, organizations, local models, host server). Ships a native binary; no Python needed.",
   "license": "Apache-2.0",
   "homepage": "https://inferenceport.ai",
@@ -11,14 +11,15 @@
   "files": ["bin/ipx.js", "lib/platform.js", "README.md"],
   "engines": { "node": ">=14" },
   "optionalDependencies": {
-    "@inferenceport-ai/ipx-win32-x64": "1.0.2",
-    "@inferenceport-ai/ipx-win32-arm64": "1.0.2",
-    "@inferenceport-ai/ipx-darwin-x64": "1.0.2",
-    "@inferenceport-ai/ipx-darwin-arm64": "1.0.2",
-    "@inferenceport-ai/ipx-linux-x64": "1.0.2",
-    "@inferenceport-ai/ipx-linux-arm64": "1.0.2"
+    "@inferenceport-ai/ipx-win32-x64": "1.0.3",
+    "@inferenceport-ai/ipx-win32-arm64": "1.0.3",
+    "@inferenceport-ai/ipx-darwin-x64": "1.0.3",
+    "@inferenceport-ai/ipx-darwin-arm64": "1.0.3",
+    "@inferenceport-ai/ipx-linux-x64": "1.0.3",
+    "@inferenceport-ai/ipx-linux-arm64": "1.0.3"
   }
 }
+
 
 
 
