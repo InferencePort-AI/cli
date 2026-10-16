@@ -106,7 +106,10 @@ def main(argv: Optional[list] = None) -> None:
     _prepare_streams()
     _register()
     try:
-        root.main(args=hoist_globals(list(sys.argv[1:] if argv is None else argv)), standalone_mode=False, prog_name="ipx")
+        code = root.main(args=hoist_globals(list(sys.argv[1:] if argv is None else argv)), standalone_mode=False, prog_name="ipx")
+        # With standalone_mode=False click *returns* the code of a click.exceptions.Exit instead of raising it.
+        if isinstance(code, int) and code:
+            sys.exit(code)
     except click.exceptions.Exit as e:
         sys.exit(e.exit_code)
     except click.Abort:

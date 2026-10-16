@@ -810,7 +810,140 @@ def domain_cmd(app: App, domains: Tuple[str, ...], wallet: Optional[str], no_llm
     _enforce(result.get("decision"), fail_on)
 
 
-group.alias("check", "scan")
+# --------------------------------------------------------------------------- single-purpose indicator checks
+
+CHECK_TYPES = ["email", "domain", "url", "ip", "phone", "username", "user_agent", "wallet", "jwt", "hash", "secret"]
+CHECK_BATCH = 500
+VERDICT_STYLE = {"clean": ui.OK, "suspicious": ui.WARN, "malicious": ui.BAD}
+
+
+def _gather_values(values: Tuple[str, ...], files: Tuple[str, ...]) -> List[str]:
+    items: List[str] = list(values)
+    for path in files:
+        items.extend(line.strip() for line in _read_source(path).splitlines()
+                     if line.strip() and not line.lstrip().startswith("#"))
+    if not items:
+        piped = _stdin_text()
+        if piped:
+            items.extend(line.strip() for line in piped.splitlines() if line.strip())
+    return list(dict.fromkeys(items))
+
+
+def _run_check(app: App, kind: str, values: List[str], lookups: Optional[bool]) -> Dict[str, Any]:
+    if not values:
+        raise click.UsageError("Give one or more values, -f FILE (one per line), or pipe them on stdin.")
+    combined: Dict[str, Any] = {"type": kind, "results": []}
+    app.require_login()
+    chunks = [values[i:i + CHECK_BATCH] for i in range(0, len(values), CHECK_BATCH)]
+    for n, chunk in enumerate(chunks, 1):
+        body: Dict[str, Any] = {"type": kind, "values": chunk}
+        if lookups is not None:
+            body["config"] = {"external_lookups": lookups}
+        with ui.status(f"Checking {len(chunk)} {kind} value(s)…" + (f" ({n}/{len(chunks)})" if len(chunks) > 1 else "")):
+            part = app.api.post("/ai-shield/check", body, timeout=120) or {}
+        combined["type"] = part.get("type", kind)
+        combined["version"] = part.get("version")
+        combined["results"].extend(part.get("results", []))
+    combined["count"] = len(combined["results"])
+    combined["summary"] = {v: sum(1 for r in combined["results"] if r.get("verdict") == v)
+                           for v in ("clean", "suspicious", "malicious")}
+    return combined
+
+
+def _fact_summary(facts: Dict[str, Any]) -> str:
+    keep = []
+    for k, v in facts.items():
+        if v in (None, "", [], {}) or k in {"valid_structure", "claims", "standard_claims", "matches", "indicators"}:
+            continue
+        keep.append(k if v is True else f"{k}={v}" if v is not False else "")
+    return ", ".join(x for x in keep if x)[:70]
+
+
+def _csv_out(results: List[Dict[str, Any]]) -> None:
+    import csv
+
+    writer = csv.writer(sys.stdout)
+    writer.writerow(["value", "verdict", "decision", "risk_score", "rules", "facts"])
+    for r in results:
+        writer.writerow([r.get("value"), r.get("verdict"), r.get("decision"), r.get("risk_score"), ";".join(r.get("rules", [])),
+                         json.dumps(r.get("facts", {}), sort_keys=True, separators=(",", ":"))])
+
+
+@group.command("check", short_help="Check one kind of indicator in bulk (email, domain, ip, url, jwt, hash…)", examples=[
+    "ipx shield check email a@mailinator.com jane@gmail.com",
+    "ipx shield check email -f signups.txt --only-flagged",
+    "ipx shield check ip -f iocs.txt --csv > triage.csv",
+    "ipx shield check domain paypa1-login.top github.com --lookups",
+    "ipx shield check jwt \"$TOKEN\" --fail-on review",
+    "ipx shield check hash 5f4dcc3b5aa765d61d8327deb882cf99",
+    "cut -d, -f2 users.csv | ipx shield check email --only-flagged --fail-on review",
+])
+@click.argument("kind", type=click.Choice(CHECK_TYPES, case_sensitive=False), metavar="TYPE")
+@click.argument("values", nargs=-1)
+@click.option("-f", "--file", "files", multiple=True, metavar="PATH", help="File with one value per line ('-' for stdin, # comments ok).")
+@click.option("--only-flagged", is_flag=True, help="Hide clean results.")
+@click.option("--csv", "as_csv", is_flag=True, help="Print results as CSV.")
+@click.option("--lookups/--no-lookups", default=None, help="Allow/forbid third-party reputation lookups (default: only for ≤10 values).")
+@click.option("--fail-on", type=click.Choice(DECISIONS), help=f"Exit with code {FAIL_EXIT_CODE} if any value is this decision or stricter.")
+@pass_app
+def check(app: App, kind: str, values: Tuple[str, ...], files: Tuple[str, ...], only_flagged: bool, as_csv: bool,
+          lookups: Optional[bool], fail_on: Optional[str]) -> None:
+    """Run one kind of check over many values and get a verdict, the rules that matched and typed facts for each.
+
+    TYPE is one of email, domain, url, ip (or CIDR), phone, username, user_agent, wallet, jwt, hash, secret. Use it for
+    narrow jobs: find disposable email domains in a signup list, triage an IOC list, audit JWTs, classify password
+    hashes or spot leaked secrets. Inputs over 500 values are sent in batches."""
+    kind = kind.lower()
+    result = _run_check(app, kind, _gather_values(values, files), lookups)
+    rows = [r for r in result["results"] if not only_flagged or r.get("verdict") != "clean"]
+    if app.json:
+        ui.emit_json({**result, "results": rows})
+    elif as_csv:
+        _csv_out(rows)
+    else:
+        table = [(r.get("value"), Text(str(r.get("verdict")), style=VERDICT_STYLE.get(r.get("verdict"), "white")), r.get("risk_score"),
+                  ", ".join(r.get("rules", [])[:3]) or "—", _fact_summary(r.get("facts") or {}) or "—") for r in rows]
+        if table:
+            ui.console.print(ui.make_table(["Value", "Verdict", "Risk", "Rules", "Facts"], table, title=f"{kind} check", right=["Risk"]))
+        s = result["summary"]
+        ui.console.print(Text.assemble((f"{result['count']} checked · ", "muted"), (f"{s['clean']} clean", ui.OK), (" · ", "muted"),
+                                       (f"{s['suspicious']} suspicious", ui.WARN), (" · ", "muted"), (f"{s['malicious']} malicious", ui.BAD)))
+    worst = max((r.get("decision", "allow") for r in result["results"]), key=lambda d: DECISIONS.index(d) if d in DECISIONS else 0,
+                default="allow")
+    _enforce(worst, fail_on)
+
+
+@group.command("disposable", short_help="Is this email (or domain) a disposable/throwaway address?", examples=[
+    "ipx shield disposable a@mailinator.com yopmail.com jane@gmail.com",
+    "ipx shield disposable -f signups.txt --only-disposable",
+    "ipx shield disposable -f signups.txt --fail-if-found",
+])
+@click.argument("values", nargs=-1)
+@click.option("-f", "--file", "files", multiple=True, metavar="PATH", help="File with one email or domain per line ('-' for stdin).")
+@click.option("--only-disposable", is_flag=True, help="Only list disposable addresses.")
+@click.option("--fail-if-found", is_flag=True, help=f"Exit with code {FAIL_EXIT_CODE} if any disposable address is found.")
+@pass_app
+def disposable(app: App, values: Tuple[str, ...], files: Tuple[str, ...], only_disposable: bool, fail_if_found: bool) -> None:
+    """Shortcut for `ipx shield check email` that answers one question: is it a disposable email provider?
+    Works offline on the server (no third-party lookups), so it is fast enough for large lists."""
+    result = _run_check(app, "email", _gather_values(values, files), False)
+    rows = [r for r in result["results"] if not only_disposable or (r.get("facts") or {}).get("disposable")]
+    found = sum(1 for r in result["results"] if (r.get("facts") or {}).get("disposable"))
+    if app.json:
+        ui.emit_json({"checked": result["count"], "disposable": found,
+                      "results": [{"value": r["value"], "disposable": bool((r.get("facts") or {}).get("disposable")),
+                                   "domain": (r.get("facts") or {}).get("domain")} for r in rows]})
+    else:
+        table = [(r["value"], (r.get("facts") or {}).get("domain") or "—",
+                  Text("disposable", style=ui.BAD) if (r.get("facts") or {}).get("disposable") else Text("ok", style=ui.OK))
+                 for r in rows]
+        if table:
+            ui.console.print(ui.make_table(["Value", "Domain", "Result"], table, title="Disposable email check"))
+        ui.console.print(Text.assemble((f"{result['count']} checked · ", "muted"), (f"{found} disposable", ui.BAD if found else ui.OK)))
+    if fail_if_found and found:
+        raise click.exceptions.Exit(FAIL_EXIT_CODE)
+
+
 group.alias("detect-phishing", "phishing")
 group.alias("capabilities", "tasks")
 group.alias("waf", "request")

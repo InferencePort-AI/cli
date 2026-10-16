@@ -179,11 +179,10 @@ def test_tasks_is_public(ipx):
 
 
 def test_aliases(ipx):
-    assert ipx("shield", "check", "--help").exit_code == 0
     assert ipx("shield", "detect-phishing", "--help").exit_code == 0
     import re
     out = ipx("shield", "--help").output
-    for alias in ("check", "waf", "upload", "wallet", "detect-phishing", "capabilities"):
+    for alias in ("waf", "upload", "wallet", "detect-phishing", "capabilities"):
         assert not re.search(rf"^\s+{alias}\s", out, re.M), alias
     assert ipx("shield", "waf", "--help").exit_code == 0
 
@@ -290,3 +289,99 @@ def test_policy_validation_errors(ipx, tmp_path):
     bad.write_text('{"rules": []}')
     assert ipx("shield", "scan", "x", "--policy", str(bad)).exit_code == 2
     assert ipx("shield", "scan", "x", "--block", "planets=mars").exit_code == 2
+
+
+# ── check / disposable ────────────────────────────────────────────────
+
+
+def _check_route(ipx, results):
+    def handler(rec):
+        vals = rec["json"]["values"]
+        return 200, {}, {"type": rec["json"]["type"], "version": "2.0", "count": len(vals),
+                         "results": [results(v) for v in vals]}
+    ipx.fake.route("POST", "/ai-shield/check", handler)
+
+
+def _email_result(v):
+    disposable = "mailinator" in v or v.startswith("yopmail")
+    return {"value": v, "verdict": "suspicious" if disposable else "clean", "decision": "challenge" if disposable else "allow",
+            "risk_score": 68 if disposable else 0, "rules": ["email.disposable"] if disposable else [],
+            "facts": {"disposable": disposable, "domain": v.rpartition("@")[2] or v, "free_provider": "gmail" in v}}
+
+
+def test_check_table_and_flags(ipx):
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    r = ipx("shield", "check", "email", "a@mailinator.com", "jane@gmail.com", "--no-lookups")
+    assert r.exit_code == 0, r.output
+    assert "suspicious" in r.output and "clean" in r.output and "email.disposable" in r.output
+    assert "2 checked" in r.output and "1 suspicious" in r.output
+    assert ipx.fake.last("/ai-shield/check")["json"] == {"type": "email", "values": ["a@mailinator.com", "jane@gmail.com"],
+                                                         "config": {"external_lookups": False}}
+
+
+def test_check_file_stdin_dedupe_only_flagged_and_fail_on(ipx, tmp_path):
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    f = tmp_path / "list.txt"
+    f.write_text("# comment\na@mailinator.com\n\njane@gmail.com\na@mailinator.com\n")
+    r = ipx("shield", "check", "email", "-f", str(f), "--only-flagged", "--fail-on", "challenge")
+    assert r.exit_code == 3, r.output
+    assert ipx.fake.last("/ai-shield/check")["json"]["values"] == ["a@mailinator.com", "jane@gmail.com"]
+    assert "jane@gmail.com" not in r.output.split("checked")[0]
+    r = ipx("shield", "check", "email", input="x@gmail.com\n")
+    assert r.exit_code == 0 and ipx.fake.last("/ai-shield/check")["json"]["values"] == ["x@gmail.com"]
+
+
+def test_check_batches_over_500(ipx, tmp_path):
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    f = tmp_path / "big.txt"
+    f.write_text("\n".join(f"u{i}@gmail.com" for i in range(1203)))
+    r = ipx("--json", "shield", "check", "email", "-f", str(f))
+    data = json.loads(r.output)
+    assert data["count"] == 1203 and data["summary"]["clean"] == 1203
+    assert [len(c["json"]["values"]) for c in ipx.fake.calls if c["path"] == "/ai-shield/check"] == [500, 500, 203]
+
+
+def test_check_csv(ipx):
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    r = ipx("shield", "check", "email", "a@mailinator.com", "--csv")
+    lines = r.output.strip().splitlines()
+    assert lines[0] == "value,verdict,decision,risk_score,rules,facts" and lines[1].startswith("a@mailinator.com,suspicious,challenge,68,email.disposable,")
+
+
+def test_check_requires_values_and_valid_type(ipx):
+    sign_in(ipx)
+    assert ipx("shield", "check", "email", input="").exit_code == 2
+    assert ipx("shield", "check", "planets", "x").exit_code == 2
+
+
+def test_disposable_shortcut(ipx):
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    r = ipx("shield", "disposable", "a@mailinator.com", "jane@gmail.com", "--fail-if-found")
+    assert r.exit_code == 3 and "1 disposable" in r.output
+    body = ipx.fake.last("/ai-shield/check")["json"]
+    assert body["type"] == "email" and body["config"] == {"external_lookups": False}
+    r = ipx("--json", "shield", "disposable", "a@mailinator.com", "jane@gmail.com", "--only-disposable")
+    data = json.loads(r.output)
+    assert data["checked"] == 2 and data["disposable"] == 1 and [x["value"] for x in data["results"]] == ["a@mailinator.com"]
+    assert ipx("shield", "disposable", "jane@gmail.com", "--fail-if-found").exit_code == 0
+
+
+def test_exit_codes_reach_the_process(ipx, monkeypatch):
+    """`ipx.cli.main` must turn --fail-on into a real process exit code (click returns it in non-standalone mode)."""
+    from ipx import cli
+
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    monkeypatch.setattr(cli, "_register", lambda: None)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["shield", "disposable", "a@mailinator.com", "--fail-if-found"])
+    assert e.value.code == 3
+    with pytest.raises(SystemExit) as e:
+        cli.main(["shield", "check", "email", "a@mailinator.com", "--fail-on", "challenge"])
+    assert e.value.code == 3
+    cli.main(["shield", "check", "email", "jane@gmail.com", "--fail-on", "challenge"])  # clean: returns normally
