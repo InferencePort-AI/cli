@@ -23,7 +23,7 @@ manager you already have — none of them need Python or anything else installed
 | You have | Command |
 | --- | --- |
 | **pip** | `pip install inferenceport-cli` |
-| **npm** | `npm install -g @inferenceport/ipx` |
+| **npm** | `npm install -g @inferenceport-ai/ipx` |
 | **cargo** | `cargo install ipx-cli` |
 | macOS / Linux shell | `curl -fsSL https://raw.githubusercontent.com/inferenceport-ai/cli/main/install.sh \| sh` |
 | Windows PowerShell | `irm https://raw.githubusercontent.com/inferenceport-ai/cli/main/install.ps1 \| iex` |
