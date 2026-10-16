@@ -36,54 +36,150 @@ CLOSE_HINTS = {
 
 # --------------------------------------------------------------------------- audio
 
+_BE = sys.byteorder == "big"
+
+
+class Resampler:
+    """Streaming linear-interpolation resampler for mono little-endian PCM16.
+
+    ``feed`` accepts audio in pieces of any size and returns the converted samples that are ready; ``flush`` returns
+    the tail. Positions are tracked as exact integers (in units of 1/``dst_rate`` input samples), so feeding a
+    recording in chunks gives byte-identical output to converting it in one go, and large inputs never have to be
+    held in memory.
+    """
+
+    def __init__(self, src_rate: int, dst_rate: int = PCM_RATE) -> None:
+        self.src = src_rate
+        self.dst = dst_rate
+        self.buf = array.array("h")
+        self.num = 0          # position of the next output sample, in 1/dst input samples from buf[0]
+        self._odd = b""
+
+    def _interp(self, buf: "array.array[int]", i0: int, rem: int) -> int:
+        a = buf[i0]
+        b = buf[i0 + 1] if i0 + 1 < len(buf) else a
+        return int((a * self.dst + (b - a) * rem) / self.dst)
+
+    def feed(self, data: bytes) -> bytes:
+        data = self._odd + data
+        keep = len(data) - (len(data) % 2)
+        self._odd = data[keep:]
+        samples = array.array("h")
+        samples.frombytes(data[:keep])
+        if _BE:  # pragma: no cover
+            samples.byteswap()
+        if self.src == self.dst:
+            out = samples
+        else:
+            self.buf.extend(samples)
+            out = array.array("h")
+            buf, num, dst = self.buf, self.num, self.dst
+            while num // dst + 1 < len(buf):          # both neighbours are available
+                out.append(self._interp(buf, num // dst, num % dst))
+                num += self.src
+            drop = min(num // dst, len(buf))
+            del buf[:drop]
+            self.num = num - drop * dst
+        if _BE:  # pragma: no cover
+            out.byteswap()
+        return out.tobytes()
+
+    def flush(self) -> bytes:
+        """The remaining sample(s); the last input sample is held, as the one-shot conversion does."""
+        if self.src == self.dst or not len(self.buf):
+            return b""
+        out = array.array("h")
+        buf, num, dst = self.buf, self.num, self.dst
+        while num // dst < len(buf):
+            out.append(self._interp(buf, num // dst, num % dst))
+            num += self.src
+        self.buf = array.array("h")
+        self.num = 0
+        if _BE:  # pragma: no cover
+            out.byteswap()
+        return out.tobytes()
+
 
 def resample_pcm16(data: bytes, src_rate: int, dst_rate: int = PCM_RATE) -> bytes:
-    """Linear-interpolation resample of mono little-endian PCM16."""
-    samples = array.array("h")
-    samples.frombytes(data[: len(data) - (len(data) % 2)])
-    if sys.byteorder == "big":  # pragma: no cover
-        samples.byteswap()
-    if src_rate == dst_rate or not samples:
-        out = samples
-    else:
-        ratio = src_rate / dst_rate
-        n = int(len(samples) / ratio)
-        last = len(samples) - 1
-        out = array.array("h", bytes(2 * n))
-        for i in range(n):
-            pos = i * ratio
-            i0 = int(pos)
-            frac = pos - i0
-            a = samples[i0]
-            b = samples[i0 + 1] if i0 < last else a
-            out[i] = int(a + (b - a) * frac)
-    if sys.byteorder == "big":  # pragma: no cover
-        out.byteswap()
-    return out.tobytes()
+    """One-shot conversion of mono PCM16 (small inputs and tests; use :class:`Resampler` for streams)."""
+    r = Resampler(src_rate, dst_rate)
+    return r.feed(data) + r.flush()
+
+
+def _rechunk(pieces: Iterator[bytes], samples: int = CHUNK_SAMPLES) -> Iterator[bytes]:
+    """Re-slice a stream of PCM16 byte strings into fixed-size chunks (the last one may be shorter)."""
+    step = samples * 2
+    buf = bytearray()
+    for piece in pieces:
+        buf += piece
+        while len(buf) >= step:
+            yield bytes(buf[:step])
+            del buf[:step]
+    if buf:
+        yield bytes(buf)
+
+
+def wav_chunks(path: str) -> Iterator[bytes]:
+    """Read a PCM WAV file incrementally as mono 24 kHz PCM16 chunks of ~200 ms."""
+    try:
+        w = wave.open(path, "rb")
+    except (wave.Error, EOFError, OSError) as e:
+        raise IpxError(f"Could not read {path} as a WAV file.",
+                       f"{e}. Convert it first: ffmpeg -i in.mp3 -ac 1 -ar 24000 -f wav out.wav")
+    with w:
+        channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+        if width != 2:
+            raise IpxError(f"{path} is {width * 8}-bit audio; 16-bit PCM is required.",
+                           "Convert it: ffmpeg -i in.wav -ac 1 -ar 24000 -sample_fmt s16 out.wav")
+        resampler = Resampler(rate)
+
+        def pieces() -> Iterator[bytes]:
+            while True:
+                try:
+                    frames = w.readframes(max(rate, 1))  # about one second at a time
+                except (wave.Error, EOFError, OSError) as e:
+                    raise IpxError(f"Could not read audio from {path}.", str(e))
+                if not frames:
+                    break
+                if channels > 1:  # keep the first channel
+                    samples = array.array("h")
+                    samples.frombytes(frames[: len(frames) - (len(frames) % (2 * channels))])
+                    frames = samples[::channels].tobytes()
+                yield resampler.feed(frames)
+            yield resampler.flush()
+
+        yield from _rechunk(pieces())
+
+
+def stdin_chunks(stream: Any, rate: int) -> Iterator[bytes]:
+    """Read raw PCM16 from ``stream`` as it arrives (so a live ``arecord`` pipe streams while it records)."""
+    resampler = Resampler(rate)
+
+    def pieces() -> Iterator[bytes]:
+        read = getattr(stream, "read1", None) or stream.read
+        while True:
+            data = read(65536)
+            if not data:
+                break
+            yield resampler.feed(data)
+        yield resampler.flush()
+
+    yield from _rechunk(pieces())
 
 
 def pcm16_from_wav(path: str) -> bytes:
-    """Read a PCM WAV file as mono 24 kHz PCM16."""
-    try:
-        with wave.open(path, "rb") as w:
-            channels, width, rate, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.readframes(w.getnframes())
-    except (wave.Error, EOFError) as e:
-        raise IpxError(f"Could not read {path} as a WAV file.",
-                       f"{e}. Convert it first: ffmpeg -i in.mp3 -ac 1 -ar 24000 -f wav out.wav")
-    if width != 2:
-        raise IpxError(f"{path} is {width * 8}-bit audio; 16-bit PCM is required.",
-                       "Convert it: ffmpeg -i in.wav -ac 1 -ar 24000 -sample_fmt s16 out.wav")
-    if channels > 1:  # keep the first channel
-        samples = array.array("h")
-        samples.frombytes(frames)
-        frames = samples[::channels].tobytes()
-    return resample_pcm16(frames, rate)
+    """A whole (small) WAV file as mono 24 kHz PCM16."""
+    return b"".join(wav_chunks(path))
 
 
 def pcm_chunks(pcm: bytes, samples: int = CHUNK_SAMPLES) -> Iterator[bytes]:
     step = samples * 2
     for i in range(0, len(pcm), step):
         yield pcm[i:i + step]
+
+
+def silence(seconds: float) -> bytes:
+    return bytes(int(PCM_RATE * seconds) * 2)
 
 
 def wav_bytes(pcm: bytes, rate: int = PCM_RATE) -> bytes:
@@ -100,32 +196,134 @@ def append_event(chunk: bytes) -> str:
     return json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(chunk).decode()})
 
 
+# --------------------------------------------------------------------------- sessions
+
+PCM_FORMAT = {"type": "audio/pcm", "rate": PCM_RATE}
+
+# Built-in defaults in the upstream's (GA) Realtime shape, used when the model catalog cannot be fetched. The catalog
+# (`GET /v1/realtime/models`) is the source of truth and wins whenever it is reachable.
+FALLBACK_SESSIONS: Dict[str, Dict[str, Any]] = {
+    "conversation": {"type": "realtime", "output_modalities": ["audio"],
+                     "audio": {"input": {"format": PCM_FORMAT, "turn_detection": {"type": "server_vad"}},
+                               "output": {"format": PCM_FORMAT}}},
+    "gpt-live-transcribe": {"type": "transcription", "audio": {"input": {
+        "format": PCM_FORMAT, "transcription": {"model": "gpt-live-transcribe"}, "turn_detection": {"type": "server_vad"}}}},
+    "scribe-v2-realtime": {"type": "transcription", "audio": {"input": {"format": PCM_FORMAT, "turn_detection": None}}},
+    "mai-transcribe-2-streaming": {"type": "transcription", "audio": {"input": {
+        "format": PCM_FORMAT, "transcription": {"model": "microsoft/mai-transcribe-2-streaming"},
+        "turn_detection": None, "noise_reduction": None}}},
+}
+TRANSCRIPTION_IDS = ("gpt-live-transcribe", "scribe-v2-realtime", "mai-transcribe-2-streaming")
+_FALLBACK_ALIASES = {"scribe-realtime": "scribe-v2-realtime"}
+
+
+def _short_id(model: str) -> str:
+    short = model.split("/")[-1]
+    return _FALLBACK_ALIASES.get(short, short)
+
+
+def model_info(app: App, model: str) -> Optional[Dict[str, Any]]:
+    """The catalog entry for ``model`` (matching id or alias), or ``None`` if the catalog is unavailable."""
+    try:
+        data = app.api.get("/v1/realtime/models", auth=False, org=False) or {}
+    except IpxError:
+        return None
+    for m in (data.get("data") if isinstance(data, dict) else None) or []:
+        if isinstance(m, dict) and (m.get("id") == model or model in (m.get("aliases") or [])):
+            return m
+    return None
+
+
+def is_transcription(info: Optional[Dict[str, Any]], model: str) -> bool:
+    if info and info.get("session_kind"):
+        return info["session_kind"] == "transcription"
+    return _short_id(model) in TRANSCRIPTION_IDS
+
+
+def default_session(info: Optional[Dict[str, Any]], model: str, *, voice: Optional[str] = None,
+                    instructions: Optional[str] = None, audio_reply: bool = False) -> Dict[str, Any]:
+    """The ``session.update`` body for ``model``.
+
+    Conversational sessions answer in text unless an audio reply is wanted (``audio_reply``), so a plain text chat is
+    never billed for audio nobody listens to. Conversational models reject input-transcription settings, so none are
+    ever added.
+    """
+    if info and isinstance(info.get("default_session"), dict):
+        session = json.loads(json.dumps(info["default_session"]))
+    elif is_transcription(info, model):
+        session = json.loads(json.dumps(FALLBACK_SESSIONS.get(_short_id(model)) or FALLBACK_SESSIONS["scribe-v2-realtime"]))
+    else:
+        session = json.loads(json.dumps(FALLBACK_SESSIONS["conversation"]))
+    if session.get("type") == "realtime":
+        session["output_modalities"] = ["audio"] if audio_reply else ["text"]
+        if instructions:
+            session["instructions"] = instructions
+        if voice and audio_reply:
+            session.setdefault("audio", {}).setdefault("output", {})["voice"] = voice
+    return session
+
+
+def manual_commit(session: Dict[str, Any]) -> bool:
+    """True when the session has no server-side turn detection, so audio must be committed explicitly."""
+    audio_in = ((session.get("audio") or {}).get("input")) or {}
+    return audio_in.get("turn_detection") is None
+
+
 # --------------------------------------------------------------------------- connection
 
 
 def realtime_url(base_url: str, model: str) -> str:
-    scheme = "wss" if base_url.lower().startswith("https") else "ws"
-    host = base_url.split("://", 1)[-1].rstrip("/")
-    return f"{scheme}://{host}/v1/realtime?" + urllib.parse.urlencode({"model": model})
+    """``wss://host[/prefix]/v1/realtime?model=...`` for an API base URL (any path prefix is kept)."""
+    parts = urllib.parse.urlsplit(base_url)
+    scheme = "wss" if parts.scheme.lower() == "https" else "ws"
+    prefix = parts.path.rstrip("/")
+    return urllib.parse.urlunsplit((scheme, parts.netloc, f"{prefix}/v1/realtime",
+                                    urllib.parse.urlencode({"model": model}), ""))
 
 
 def open_session(app: App, model: str, session_update: Optional[Dict[str, Any]]) -> wsmod.WebSocket:
-    """Connect to ``/v1/realtime`` as the signed-in user (or org) and send the initial ``session.update``."""
+    """Connect to ``/v1/realtime`` as the signed-in user (or org) and send the initial ``session.update``.
+
+    A 401 at the handshake refreshes the session once and retries, like every other API call.
+    """
     app.require_login()
     app.api._maybe_refresh()
-    token = app.creds.access_token
-    headers = {"Authorization": f"Bearer {token}", "X-Client-ID": app.cfg.client_id}
-    if app.org:
-        headers[ORG_HEADER] = app.org
-    conn = wsmod.connect(realtime_url(app.api.base_url, model), headers=headers, subprotocol="realtime")
+    url = realtime_url(app.api.base_url, model)
+    conn: Optional[wsmod.WebSocket] = None
+    for attempt in (0, 1):
+        headers = {"Authorization": f"Bearer {app.creds.access_token}", "X-Client-ID": app.cfg.client_id}
+        if app.org:
+            headers[ORG_HEADER] = app.org
+        try:
+            conn = wsmod.connect(url, headers=headers, subprotocol="realtime")
+            break
+        except ApiError as e:
+            refresher = app.api.refresher
+            if e.status == 401 and attempt == 0 and refresher and app.creds.data.get("refresh_token") and refresher(app.cfg, app.creds):
+                continue
+            if e.status == 401:
+                e.hint = "Your session expired or the token was rejected. Run `ipx auth login`."
+            raise
+    assert conn is not None
     if session_update:
         conn.send_text(json.dumps({"type": "session.update", "session": session_update}))
     return conn
 
 
+CLOSE_STATUS = {4400: 400, 4401: 401, 4402: 402, 4403: 403, 4404: 404, 4408: 408, 4429: 429, 1011: 502}
+
+
 def closed_error(e: wsmod.WebSocketClosed) -> IpxError:
-    message, hint = CLOSE_HINTS.get(e.code, (e.reason or f"The connection was closed (code {e.code}).", None))
-    return ApiError(402 if e.code == 4402 else 400, message, hint) if e.code in CLOSE_HINTS else IpxError(message, hint)
+    """A normal :class:`IpxError` for an unexpected close (a mapped hint for our own codes, the reason otherwise)."""
+    if e.code in CLOSE_HINTS:
+        message, hint = CLOSE_HINTS[e.code]
+        return ApiError(CLOSE_STATUS.get(e.code, 400), message, hint)
+    reason = e.reason or (f"The connection was lost (code {e.code})." if e.code == 1006 else f"The server closed the connection (code {e.code}).")
+    return IpxError(reason, "Try again; check `ipx status` if it keeps happening." if e.code in (1006, 1011) else None)
+
+
+def is_normal_close(code: Optional[int]) -> bool:
+    return code in (1000, 1001, 1005)
 
 
 def parse(raw: Optional[str]) -> Optional[Dict[str, Any]]:

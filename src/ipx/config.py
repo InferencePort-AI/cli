@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -81,12 +82,21 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 def _write_json(path: Path, data: Dict[str, Any], private: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(str(tmp), flags, 0o600 if private else 0o644)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-    os.replace(str(tmp), str(path))
+    # A unique temporary file per writer: two `ipx` processes saving at once (for example refreshing the same login)
+    # must never share a path, or one could replace it while the other is still writing.
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        if not private:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     if private and sys.platform != "win32":
         os.chmod(str(path), 0o600)
 

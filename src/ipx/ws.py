@@ -1,8 +1,9 @@
 """Minimal dependency-free WebSocket client (RFC 6455) for the realtime commands.
 
-Only what `ipx` needs: ``ws://`` and ``wss://``, request headers, one subprotocol, text and binary frames,
-fragmentation, ping/pong and the close handshake. ``recv`` accepts a timeout that only applies while waiting for the
-*start* of a frame, so a timeout can never leave a half-read frame behind.
+Only what `ipx` needs: TLS WebSockets (plain ones are limited to loopback hosts, so a bearer token is never sent in
+the clear), request headers, one subprotocol, text and binary frames, fragmentation, ping/pong and the close handshake.
+``recv`` accepts a timeout that only applies while waiting for the *start* of a frame, so a timeout can never leave a
+half-read frame behind.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import select
 import socket
 import ssl
 import struct
+import time
 import urllib.parse
 from typing import Dict, Optional, Tuple
 
@@ -66,7 +68,10 @@ class WebSocket:
             header.append(0x80 | 127)
             header += struct.pack("!Q", n)
         mask = os.urandom(4)
-        self.sock.sendall(bytes(header) + mask + _xor(payload, mask))
+        try:
+            self.sock.sendall(bytes(header) + mask + _xor(payload, mask))
+        except (OSError, ssl.SSLError) as e:
+            raise WebSocketClosed(self.close_code or 1006, f"The connection dropped while sending ({e}).")
 
     def send_text(self, text: str) -> None:
         self._send_frame(OP_TEXT, text.encode("utf-8"))
@@ -119,10 +124,14 @@ class WebSocket:
         message = bytearray()
         message_op = OP_TEXT
         in_message = False
+        # One absolute deadline for the whole call: control frames (pings) must not restart the wait.
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             # The timeout only covers the wait for a frame to start; once a message is in flight we read it through.
-            if not in_message and not self._readable(timeout):
-                return None
+            if not in_message:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                if not self._readable(remaining):
+                    return None
             fin, opcode, payload = self._read_frame()
             if opcode == OP_PING:
                 self._send_frame(OP_PONG, payload)
@@ -183,6 +192,9 @@ def connect(url: str, *, headers: Optional[Dict[str, str]] = None, subprotocol: 
         raise IpxError(f"Not a WebSocket URL: {url}")
     secure = parts.scheme == "wss"
     host = parts.hostname or ""
+    if not secure and host not in ("localhost", "127.0.0.1", "::1"):
+        raise IpxError(f"Refusing to open an unencrypted WebSocket to {host}.",
+                       "Use an https:// base URL; plain ws:// is only allowed for localhost.")
     port = parts.port or (443 if secure else 80)
     path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
 

@@ -78,11 +78,23 @@ def refresh(cfg: Config, creds: Credentials) -> bool:
     try:
         session = _auth_call(cfg, "POST", "/auth/v1/token?grant_type=refresh_token", {"refresh_token": rt})
     except IpxError:
-        return False
+        return _refreshed_elsewhere(creds, rt)
     if not session.get("access_token"):
         return False
     creds.store_session(session)
     return True
+
+
+def _refreshed_elsewhere(creds: Credentials, used_refresh_token: str) -> bool:
+    """Refresh tokens rotate: if another `ipx` process refreshed first our token was consumed, but the login on disk
+    is already fresh. Pick that up instead of failing."""
+    from ipx.config import _read_json
+
+    latest = _read_json(creds.path)
+    if latest.get("auth_type") == "jwt" and latest.get("refresh_token") and latest.get("refresh_token") != used_refresh_token:
+        creds.data = latest
+        return True
+    return False
 
 
 def fetch_user(cfg: Config, access_token: str) -> Dict[str, Any]:
