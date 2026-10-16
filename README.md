@@ -98,4 +98,4 @@ the release binary), `.github/workflows` (CI and the multi-platform release pipe
 
 ## License
 
-Apache-2.0 — © InferencePort LLC.
+Apache-2.0 — © 2026 InferencePort LLC. InferencePort AI™ is a Common-Law trademark of InferencePort LLC.
