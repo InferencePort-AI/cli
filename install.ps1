@@ -1,6 +1,6 @@
 # Install the latest ipx release binary on Windows.
 #   irm https://raw.githubusercontent.com/inferenceport-ai/cli/main/install.ps1 | iex
-# Options: $env:IPX_VERSION = "1.0.2"; $env:IPX_INSTALL_DIR = "$HOME\bin"
+# Options: $env:IPX_VERSION = "1.0.3"; $env:IPX_INSTALL_DIR = "$HOME\bin"
 $ErrorActionPreference = "Stop"
 
 $repo = "inferenceport-ai/cli"
@@ -32,6 +32,7 @@ try {
 finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
+
 
 
 
