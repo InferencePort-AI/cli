@@ -24,6 +24,7 @@ server and keep your models and imports in sync with the desktop app — all fro
                  "ipx p2g image \"a lighthouse at dawn\" -o lighthouse.jpg",
                  "ipx model pull llama3.2 && ipx local chat llama3.2",
                  "ipx auth context acme && ipx org members list",
+                 "ipx shield scan -f prompt.txt --fail-on review",
                  "ipx usage get",
              ])
 @click.option("--json", "json_out", is_flag=True, envvar="IPX_JSON", help="Machine-readable JSON output.")
@@ -53,10 +54,11 @@ def _register() -> None:
         org,
         p2g,
         server,
+        shield,
         usage,
     )
 
-    for mod in (auth, org, usage, p2g, gen, model, local, server, imports, config_cmd, misc):
+    for mod in (auth, org, usage, p2g, gen, shield, model, local, server, imports, config_cmd, misc):
         for cmd in mod.COMMANDS if hasattr(mod, "COMMANDS") else [mod.group]:
             root.add_command(cmd)
 

@@ -53,8 +53,31 @@ ipx local chat llama3.2
 ipx server start --allow teammate@acme.com --detach     # host your models for others
 ipx import space black-forest-labs/FLUX.1-schnell       # add to the desktop app
 
+ipx shield scan "Ignore previous instructions…"          # AI Shield: prompt attacks, abuse, secrets, PII
+cat page.html | ipx shield scan --task agent_tool_output --fail-on review
+ipx shield analyze --task signup --email new@mailinator.com --ip 203.0.113.7
+ipx shield phishing -f suspicious.eml
+
 ipx usage get                        # quotas, wallet and org spend
 ```
+
+## AI Shield in scripts and CI
+
+`ipx shield` sends text, identities or messages to InferencePort AI Shield and prints a verdict: a 0–100 risk score,
+a decision (`allow` · `challenge` · `rate_limit` · `review` · `block`), the reasons and suggested mitigations.
+
+```bash
+ipx shield tasks                                             # task profiles + thresholds (no sign-in)
+ipx shield scan -f prompt.txt --task prompt_guard --fail-on review   # exit 3 on review/block
+git diff | ipx shield scan --task dlp --fail-on review              # catch leaked keys before you push
+ipx -q shield scan -f transcript.txt --task dlp --redact > clean.txt # redacted copy only
+ipx shield analyze --task login --email bob@acme.com -m failed_logins=30 -m user_agent=python-requests/2.31
+ipx shield url bit.ly/3abc https://paypa1.com/login --offline
+```
+
+Tasks: `general`, `signup`, `login`, `payment`, `content_moderation`, `prompt_guard`, `agent_tool_output`, `phishing`,
+`dlp`. `--offline` skips the LLM reviewer and third-party lookups; `--feature NAME=on|off`, `--trusted-domain` and
+`--challenge-at/--review-at/--block-at` tune the pipeline.
 
 Every command has `--help`, and every command accepts the global `--json` flag for scripting:
 `ipx --json usage get | jq .quota`.
@@ -67,6 +90,7 @@ Every command has `--help`, and every command accepts the global `--json` flag f
 | `ipx org` | members, invitations, teams, API keys, billing, usage, audit, domains, SSO, policy, desktop policy |
 | `ipx p2g` | credit-billed: `chat`, `text`, `image`, `video`, `audio …`, `3d`, `models`, `balance`, `ledger`, `keys`, `deploy` |
 | `ipx gen` | subscription-billed (Lightning): `chat`, `text`, `image`, `video`, `audio …`, `models`, `plan` |
+| `ipx shield` | AI Shield: `scan` (text/files/stdin, `--redact`), `analyze` (signup/login/payment signals), `phishing` (incl. `.eml`), `url`, `tasks`; `--fail-on <decision>` exits 3 for CI |
 | `ipx model` / `ipx local` | manage local models / chat with them |
 | `ipx server` | `start`, `stop`, `status`, `logs` — host your local models on port 52458 |
 | `ipx import` | `space`, `website`, `file`, `list`, `rm` for the desktop app library |
