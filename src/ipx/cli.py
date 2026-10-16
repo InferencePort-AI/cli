@@ -24,6 +24,7 @@ server and keep your models and imports in sync with the desktop app — all fro
                  "ipx p2g image \"a lighthouse at dawn\" -o lighthouse.jpg",
                  "ipx model pull llama3.2 && ipx local chat llama3.2",
                  "ipx auth context acme && ipx org members list",
+                 "ipx shield scan -f prompt.txt --fail-on review",
                  "ipx featherless deploy Qwen/Qwen2.5-7B-Instruct",
                  "ipx agent chat acme-bot/support",
                  "ipx mcp council reason \"…\" --tier basic",
@@ -59,10 +60,11 @@ def _register() -> None:
         org,
         p2g,
         server,
+        shield,
         usage,
     )
 
-    for mod in (auth, org, usage, p2g, gen, featherless, agent, mcp, model, local, server, imports, config_cmd, misc):
+    for mod in (auth, org, usage, p2g, gen, shield, featherless, agent, mcp, model, local, server, imports, config_cmd, misc):
         for cmd in mod.COMMANDS if hasattr(mod, "COMMANDS") else [mod.group]:
             root.add_command(cmd)
 
@@ -110,7 +112,10 @@ def main(argv: Optional[list] = None) -> None:
     _prepare_streams()
     _register()
     try:
-        root.main(args=hoist_globals(list(sys.argv[1:] if argv is None else argv)), standalone_mode=False, prog_name="ipx")
+        code = root.main(args=hoist_globals(list(sys.argv[1:] if argv is None else argv)), standalone_mode=False, prog_name="ipx")
+        # With standalone_mode=False click *returns* the code of a click.exceptions.Exit instead of raising it.
+        if isinstance(code, int) and code:
+            sys.exit(code)
     except click.exceptions.Exit as e:
         sys.exit(e.exit_code)
     except click.Abort:
