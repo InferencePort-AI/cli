@@ -733,28 +733,25 @@ def test_ping_traffic_does_not_extend_the_idle_timeout(wsserver):
 
 
 def test_control_frames_are_answered_while_uploading_audio(ipx, wsserver, tmp_path):
-    order = []
+    answered = []
 
     async def script(ws, rec):
         pong = await ws.ping()
-        asyncio.ensure_future(_note_pong(pong, order))
         async for raw in ws:
             ev = json.loads(raw)
             rec["frames"].append(ev)
-            if ev["type"] == "input_audio_buffer.commit":
-                order.append("commit")
             if ev["type"] == "response.create":
+                # The reply is only released once the client has answered the ping, so the test cannot pass (or
+                # race) on timing: an unanswered ping would stall the session and fail the command.
+                await asyncio.wait_for(pong, 5)
+                answered.append(True)
                 await ws.send(response_done())
-
-    async def _note_pong(pong, order):
-        await pong
-        order.append("pong")
 
     sign_in(ipx)
     srv = wsserver(script)
     wav = make_wav(tmp_path / "long.wav", seconds=1.4, rate=24000)   # 7 chunks
     ipx("p2g", "realtime", "chat", "--audio-in", str(wav), env={"IPX_BASE_URL": srv.url})
-    assert order.index("pong") < order.index("commit")   # the pong went out mid-upload, not after it
+    assert answered == [True]
 
 
 def test_chat_keeps_audio_that_arrived_before_a_failure(ipx, wsserver, tmp_path):
