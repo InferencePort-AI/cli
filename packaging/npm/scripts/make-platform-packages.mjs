@@ -31,7 +31,7 @@ for (const t of targets) {
     console.warn(`skip ${t.os}-${t.cpu}: ${src} not found`);
     continue;
   }
-  const name = `@inferenceport/ipx-${t.os}-${t.cpu}`;
+  const name = `@inferenceport-ai/ipx-${t.os}-${t.cpu}`;
   const dir = path.join(outDir, `ipx-${t.os}-${t.cpu}`);
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
@@ -56,7 +56,7 @@ for (const t of targets) {
       2
     ) + "\n"
   );
-  fs.writeFileSync(path.join(dir, "README.md"), `# ${name}\n\nPlatform binary for [\`@inferenceport/ipx\`](https://www.npmjs.com/package/@inferenceport/ipx). Install that package instead.\n`);
+  fs.writeFileSync(path.join(dir, "README.md"), `# ${name}\n\nPlatform binary for [\`@inferenceport-ai/ipx\`](https://www.npmjs.com/package/@inferenceport-ai/ipx). Install that package instead.\n`);
   console.log(`built ${name}@${version}`);
   made++;
 }

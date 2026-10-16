@@ -130,5 +130,4 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           cp ../../LICENSE LICENSE
-          cp ../npm/ipx/README.md README.md
           cargo publish --allow-dirty

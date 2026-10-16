@@ -2,7 +2,7 @@
 
 // Locates the native ipx binary for this machine.
 //   IPX_BINARY_PATH  use this file instead (development, CI smoke tests)
-//   otherwise        the optional dependency @inferenceport/ipx-<os>-<cpu> that npm installed for this platform
+//   otherwise        the optional dependency @inferenceport-ai/ipx-<os>-<cpu> that npm installed for this platform
 const fs = require("fs");
 const path = require("path");
 
@@ -22,7 +22,7 @@ function resolveBinary() {
     throw new Error(`no prebuilt binary for ${key} (supported: ${SUPPORTED.join(", ")}). Install with pip or build from source.`);
   }
 
-  const pkg = `@inferenceport/ipx-${key}`;
+  const pkg = `@inferenceport-ai/ipx-${key}`;
   const exe = process.platform === "win32" ? "ipx.exe" : "ipx";
   let pkgJson;
   try {
@@ -35,7 +35,7 @@ function resolveBinary() {
   }
   const bin = path.join(path.dirname(pkgJson), "bin", exe);
   if (!fs.existsSync(bin)) {
-    throw new Error(`${pkg} is installed but ${bin} is missing; try reinstalling @inferenceport/ipx.`);
+    throw new Error(`${pkg} is installed but ${bin} is missing; try reinstalling @inferenceport-ai/ipx.`);
   }
   return bin;
 }

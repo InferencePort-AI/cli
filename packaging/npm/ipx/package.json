@@ -11,12 +11,12 @@
   "files": ["bin/ipx.js", "lib/platform.js", "README.md"],
   "engines": { "node": ">=14" },
   "optionalDependencies": {
-    "@inferenceport/ipx-win32-x64": "1.0.0",
-    "@inferenceport/ipx-win32-arm64": "1.0.0",
-    "@inferenceport/ipx-darwin-x64": "1.0.0",
-    "@inferenceport/ipx-darwin-arm64": "1.0.0",
-    "@inferenceport/ipx-linux-x64": "1.0.0",
-    "@inferenceport/ipx-linux-arm64": "1.0.0"
+    "@inferenceport-ai/ipx-win32-x64": "1.0.0",
+    "@inferenceport-ai/ipx-win32-arm64": "1.0.0",
+    "@inferenceport-ai/ipx-darwin-x64": "1.0.0",
+    "@inferenceport-ai/ipx-darwin-arm64": "1.0.0",
+    "@inferenceport-ai/ipx-linux-x64": "1.0.0",
+    "@inferenceport-ai/ipx-linux-arm64": "1.0.0"
   }
 }
 
