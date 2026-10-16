@@ -46,7 +46,7 @@ for (const t of targets) {
         version,
         description: `ipx native binary for ${t.os}-${t.cpu}`,
         license: "Apache-2.0",
-        repository: { type: "git", url: "git+https://github.com/inferenceport-ai/cli.git" },
+        repository: { type: "git", url: "https://github.com/inferenceport-ai/cli" },
         os: [t.os],
         cpu: [t.cpu],
         files: ["bin"],
