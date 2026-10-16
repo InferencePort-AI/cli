@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from email import policy
 from email.parser import BytesParser
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 import click
 from rich.text import Text
@@ -51,26 +53,88 @@ def group() -> None:
 # --------------------------------------------------------------------------- input helpers
 
 
-def _read_source(path: str) -> str:
-    if path == "-":
-        return sys.stdin.read()
-    path = os.path.expanduser(path)
-    if not os.path.isfile(path):
+def _too_big(label: str, limit: int) -> IpxError:
+    return IpxError(f"{label} is larger than {limit // 1_000_000} MB, the inspection limit.", "Split it or scan an excerpt.")
+
+
+def _read_bytes(path: str, limit: int = MAX_FILE_BYTES) -> bytes:
+    """Read a regular file, never more than ``limit`` bytes. The size is checked on the open descriptor and the read
+    is capped at limit+1, so a file that grows or is swapped after the check cannot exhaust memory."""
+    full = os.path.expanduser(path)
+    try:
+        with open(full, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise IpxError(f"{path} is not a regular file.")
+            if st.st_size > limit:
+                raise _too_big(path, limit)
+            data = fh.read(limit + 1)
+    except FileNotFoundError:
         raise IpxError(f"File not found: {path}")
-    if os.path.getsize(path) > MAX_FILE_BYTES:
-        raise IpxError(f"{path} is larger than {MAX_FILE_BYTES // 1_000_000} MB.", "Split the file or scan an excerpt.")
-    with open(path, "rb") as fh:
-        return fh.read().decode("utf-8", "replace")
+    except OSError as e:
+        raise IpxError(f"Cannot read {path}: {e.strerror or e}")
+    if len(data) > limit:
+        raise _too_big(path, limit)
+    return data
+
+
+def _read_stdin(limit: int = MAX_FILE_BYTES) -> str:
+    data = sys.stdin.read(limit + 1)
+    if len(data) > limit:
+        raise _too_big("Input on stdin", limit)
+    return data
+
+
+def _read_source(path: str, limit: int = MAX_FILE_BYTES) -> str:
+    if path == "-":
+        return _read_stdin(limit)
+    return _read_bytes(path, limit).decode("utf-8", "replace")
 
 
 def _stdin_text() -> Optional[str]:
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return None
-        data = sys.stdin.read()
-        return data if data.strip() else None
     except (OSError, ValueError):
         return None
+    data = _read_stdin()
+    return data if data.strip() else None
+
+
+def _load_json_file(path: str, what: str) -> Any:
+    try:
+        return json.loads(_read_source(path))
+    except ValueError as e:
+        raise IpxError(f"{what} {path} is not valid JSON: {e}")
+
+
+def _loads_unambiguous(text: str) -> Any:
+    """json.loads that rejects duplicate object keys (a parser-differential trick) instead of silently keeping the last."""
+    def pairs(items):
+        seen = set()
+        for k, _ in items:
+            if k in seen:
+                raise IpxError(f"Ambiguous JSON: duplicate key {k!r}.", "Remove the duplicate so the scanner sees what your server sees.")
+            seen.add(k)
+        return dict(items)
+    return json.loads(text, object_pairs_hook=pairs)
+
+
+def _add_header(headers: Dict[str, str], name: str, value: str) -> None:
+    """Keep repeated headers (comma-joined, as HTTP defines) so the scanner sees every value."""
+    for existing in headers:
+        if existing.lower() == name.lower():
+            headers[existing] = f"{headers[existing]}, {value}"
+            return
+    headers[name] = value
+
+
+def _require_secure_transport(app: App, what: str) -> None:
+    url = getattr(app.api, "base_url", "") or ""
+    parts = urlsplit(url)
+    if parts.scheme != "https" and (parts.hostname or "") not in {"localhost", "127.0.0.1", "::1"}:
+        raise IpxError(f"Refusing to send {what} to {url or 'the API'} over plain HTTP.",
+                       "Use an https:// base URL (`ipx config set base_url https://…`, IPX_BASE_URL or --base-url).")
 
 
 def _coerce(value: str) -> Any:
@@ -139,17 +203,21 @@ def _store_policy_file(ctx: click.Context, param: click.Parameter, value: Option
     if not value:
         return
     try:
-        with open(os.path.expanduser(value), encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError) as e:
-        raise click.BadParameter(f"could not read JSON policy: {e}", param_hint="--policy")
+        data = json.loads(_read_source(value))
+    except (IpxError, ValueError) as e:
+        raise click.BadParameter(f"could not read JSON policy: {getattr(e, 'message', e)}", param_hint="--policy")
     if not isinstance(data, dict):
         raise click.BadParameter("policy file must be a JSON object", param_hint="--policy")
     unknown = set(data) - {"blocklists", "allowlists", "custom_rules"}
     if unknown:
         raise click.BadParameter(f"unknown keys {sorted(unknown)} (expected blocklists, allowlists, custom_rules)",
                                  param_hint="--policy")
-    ctx.meta.setdefault("shield_policy", {}).update(data)
+    policy = ctx.meta.setdefault("shield_policy", {})
+    for key in ("blocklists", "allowlists"):
+        for name, items in (data.get(key) or {}).items():
+            policy.setdefault(key, {}).setdefault(name, []).extend(items if isinstance(items, list) else [items])
+    if isinstance(data.get("custom_rules"), list):
+        policy.setdefault("custom_rules", []).extend(data["custom_rules"])
 
 
 def _store_list_entries(kind: str):
@@ -170,6 +238,20 @@ def _policy_from_context() -> Dict[str, Any]:
     return dict(ctx.meta.get("shield_policy") or {}) if ctx else {}
 
 
+def _policy_options(fn):
+    opts = [
+        click.option("--policy", metavar="FILE", expose_value=False, callback=_store_policy_file, is_eager=True,
+                     help="JSON file with blocklists, allowlists and custom_rules."),
+        click.option("--block", multiple=True, metavar="LIST=VALUE[,VALUE]", expose_value=False,
+                     callback=_store_list_entries("blocklists"), help="Blocklist entry, e.g. countries=KP or ips=203.0.113.0/24."),
+        click.option("--allow", multiple=True, metavar="LIST=VALUE[,VALUE]", expose_value=False,
+                     callback=_store_list_entries("allowlists"), help="Allowlist entry, e.g. email_domains=mycorp.com."),
+    ]
+    for opt in reversed(opts):
+        fn = opt(fn)
+    return fn
+
+
 def _common_options(fn):
     opts = [
         click.option("--no-llm", is_flag=True, help="Skip the LLM reviewer (deterministic verdict only)."),
@@ -181,16 +263,10 @@ def _common_options(fn):
         click.option("--block-at", type=click.IntRange(0, 100), help="Override the block threshold."),
         click.option("--fail-on", type=click.Choice(DECISIONS), help=f"Exit with code {FAIL_EXIT_CODE} if the decision is this or stricter."),
         click.option("-e", "--evidence", "show_evidence", is_flag=True, help="Show every piece of evidence."),
-        click.option("--policy", metavar="FILE", expose_value=False, callback=_store_policy_file, is_eager=True,
-                     help="JSON file with blocklists, allowlists and custom_rules."),
-        click.option("--block", multiple=True, metavar="LIST=VALUE[,VALUE]", expose_value=False,
-                     callback=_store_list_entries("blocklists"), help="Blocklist entry, e.g. countries=KP or ips=203.0.113.0/24."),
-        click.option("--allow", multiple=True, metavar="LIST=VALUE[,VALUE]", expose_value=False,
-                     callback=_store_list_entries("allowlists"), help="Allowlist entry, e.g. email_domains=mycorp.com."),
     ]
     for opt in reversed(opts):
         fn = opt(fn)
-    return fn
+    return _policy_options(fn)
 
 
 # --------------------------------------------------------------------------- rendering
@@ -289,6 +365,21 @@ def render_verdict(d: Dict[str, Any], *, title: str = "AI Shield", show_evidence
         ui.console.print(d["redacted_content"], markup=False, highlight=False)
 
 
+def _scrub_previews(result: Dict[str, Any]) -> Dict[str, Any]:
+    """With --redact nothing derived from a secret (not even a masked preview) is printed."""
+    for item in (result.get("findings") or {}).get("sensitive_data") or []:
+        if isinstance(item, dict) and "preview" in item:
+            item["preview"] = "[redacted]"
+    return result
+
+
+def _finish(error: Optional[IpxError], done: int, total: int) -> None:
+    """Results of completed requests were already printed; now report the failure of a later one."""
+    if error is not None:
+        ui.warn(f"Stopped after {done} of {total} input(s); the results above are complete for those.")
+        raise error
+
+
 def _enforce(decision: Optional[str], fail_on: Optional[str]) -> None:
     if fail_on and decision in DECISIONS and DECISIONS.index(decision) >= DECISIONS.index(fail_on):
         raise click.exceptions.Exit(FAIL_EXIT_CODE)
@@ -342,13 +433,21 @@ def scan(app: App, text: Optional[str], files: Tuple[str, ...], task: str, sourc
                   challenge_at=challenge_at, review_at=review_at, block_at=block_at)
 
     results: List[Dict[str, Any]] = []
+    error: Optional[IpxError] = None
     for label, content in inputs:
         body: Dict[str, Any] = {"content": content, "task": task, "config": cfg}
         if source:
             body["source"] = source
         if urls:
             body["urls"] = list(urls)
-        results.append({"input": label, **_post(app, "/ai-shield/scan", body)})
+        try:
+            part = _post(app, "/ai-shield/scan", body)
+        except IpxError as e:
+            if not results:
+                raise
+            error = e
+            break
+        results.append({"input": label, **(_scrub_previews(part) if redact else part)})
 
     if app.json:
         ui.emit_json(results[0] if len(results) == 1 else results)
@@ -357,12 +456,13 @@ def scan(app: App, text: Optional[str], files: Tuple[str, ...], task: str, sourc
             sys.stdout.write(str(r.get("redacted_content", "")))
     else:
         for r in results:
-            render_verdict(r, title=f"AI Shield · {r['input']}" if len(results) > 1 else "AI Shield",
+            render_verdict(r, title=f"AI Shield · {r['input']}" if len(inputs) > 1 else "AI Shield",
                            show_evidence=show_evidence, show_redacted=redact)
         if len(results) > 1:
             ui.console.print(ui.make_table(["Input", "Decision", "Risk"], [
                 (r["input"], _decision_text(str(r.get("decision"))), r.get("risk_score")) for r in results], title="Summary",
                 right=["Risk"]))
+    _finish(error, len(results), len(inputs))
     worst = max((r.get("decision", "allow") for r in results), key=lambda d: DECISIONS.index(d) if d in DECISIONS else 0)
     _enforce(worst, fail_on)
 
@@ -387,8 +487,8 @@ def scan(app: App, text: Optional[str], files: Tuple[str, ...], task: str, sourc
 @click.option("--sender", help="Message sender ('Name <addr@domain>').")
 @click.option("-m", "--meta", "meta", multiple=True, metavar="KEY=VALUE",
               help="Metadata signal, e.g. form_fill_ms=800, failed_logins=12, email_verified=true (repeatable).")
-@click.option("--meta-file", type=click.Path(exists=True, dir_okay=False), help="JSON object of metadata signals.")
-@click.option("--body", "body_file", type=click.Path(exists=True, dir_okay=False),
+@click.option("--meta-file", metavar="PATH", help="JSON object of metadata signals.")
+@click.option("--body", "body_file", metavar="PATH",
               help="A full JSON request body; flags are merged on top.")
 @click.option("--remember", is_flag=True, help="Store this verdict in Shield memory (enables history/duplicate detection later).")
 @_common_options
@@ -402,17 +502,12 @@ def analyze(app: App, task: Optional[str], email: Optional[str], phone: Optional
     """Full analysis of any mix of identity, device, behaviour, transaction and content signals."""
     body: Dict[str, Any] = {}
     if body_file:
-        with open(body_file, encoding="utf-8") as fh:
-            try:
-                body = json.load(fh)
-            except ValueError as e:
-                raise IpxError(f"{body_file} is not valid JSON: {e}")
+        body = _load_json_file(body_file, "Request body")
         if not isinstance(body, dict):
             raise IpxError(f"{body_file} must contain a JSON object.")
     metadata: Dict[str, Any] = dict(body.get("metadata") or {})
     if meta_file:
-        with open(meta_file, encoding="utf-8") as fh:
-            loaded = json.load(fh)
+        loaded = _load_json_file(meta_file, "Metadata file")
         if not isinstance(loaded, dict):
             raise IpxError("--meta-file must contain a JSON object.")
         metadata.update(loaded)
@@ -449,21 +544,25 @@ def analyze(app: App, task: Optional[str], email: Optional[str], phone: Optional
     _enforce(result.get("decision"), fail_on)
 
 
-def _parse_eml(raw: bytes) -> Dict[str, Any]:
+def _parse_eml(raw: bytes, *, trust_auth: bool = False) -> Dict[str, Any]:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
     body_part = msg.get_body(preferencelist=("plain", "html"))
     text = body_part.get_content() if body_part is not None else ""
     out: Dict[str, Any] = {"sender": str(msg.get("From", "")), "subject": str(msg.get("Subject", "")), "content": text}
     if msg.get("Reply-To"):
         out["reply_to"] = str(msg["Reply-To"])
-    auth_header = " ".join(str(h) for h in msg.get_all("Authentication-Results", []) or []).lower()
-    auth: Dict[str, str] = {}
-    for mech in ("spf", "dkim", "dmarc"):
-        marker = f"{mech}="
-        if marker in auth_header:
-            auth[mech] = auth_header.split(marker, 1)[1].split()[0].strip(";")
-    if auth:
-        out["authentication"] = auth
+    # Authentication-Results is only meaningful when YOUR receiving server added it; a sender can forge the header, so it is
+    # ignored unless the caller vouches for it, and then only the topmost (most recently added) header is used.
+    if trust_auth:
+        headers = msg.get_all("Authentication-Results", []) or []
+        top = str(headers[0]).lower() if headers else ""
+        auth: Dict[str, str] = {}
+        for mech in ("spf", "dkim", "dmarc"):
+            marker = f"{mech}="
+            if marker in top:
+                auth[mech] = top.split(marker, 1)[1].split()[0].strip(";")
+        if auth:
+            out["authentication"] = auth
     return out
 
 
@@ -478,21 +577,23 @@ def _parse_eml(raw: bytes) -> Dict[str, Any]:
 @click.option("--subject")
 @click.option("--reply-to")
 @click.option("--url", "urls", multiple=True, help="Link from the message (repeatable).")
+@click.option("--trust-eml-auth", is_flag=True,
+              help="Use the Authentication-Results header of a .eml (only if YOUR mail server added it; senders can forge it).")
 @click.option("--spf", type=click.Choice(["pass", "fail", "softfail", "none", "neutral"]), help="SPF result if known.")
 @click.option("--dkim", type=click.Choice(["pass", "fail", "none", "neutral"]), help="DKIM result if known.")
 @click.option("--dmarc", type=click.Choice(["pass", "fail", "none"]), help="DMARC result if known.")
 @_common_options
 @pass_app
 def phishing(app: App, text: Optional[str], file_: Optional[str], sender: Optional[str], subject: Optional[str],
-             reply_to: Optional[str], urls: Tuple[str, ...], spf: Optional[str], dkim: Optional[str], dmarc: Optional[str],
+             reply_to: Optional[str], urls: Tuple[str, ...], trust_eml_auth: bool, spf: Optional[str], dkim: Optional[str],
+             dmarc: Optional[str],
              no_llm: bool, offline: bool, features: Tuple[str, ...], trusted: Tuple[str, ...], challenge_at: Optional[int],
              review_at: Optional[int], block_at: Optional[int], fail_on: Optional[str], show_evidence: bool) -> None:
     """Phishing verdict combining lure language, look-alike links, sender spoofing and SPF/DKIM/DMARC results."""
     body: Dict[str, Any] = {}
     if file_:
         if file_ != "-" and file_.lower().endswith(".eml"):
-            with open(os.path.expanduser(file_), "rb") as fh:
-                body.update(_parse_eml(fh.read()))
+            body.update(_parse_eml(_read_bytes(file_), trust_auth=trust_eml_auth))
         else:
             body["content"] = _read_source(file_)
     if text is not None:
@@ -509,8 +610,8 @@ def phishing(app: App, text: Optional[str], file_: Optional[str], sender: Option
     auth = {k: v for k, v in (("spf", spf), ("dkim", dkim), ("dmarc", dmarc)) if v}
     if auth:
         body["authentication"] = {**(body.get("authentication") or {}), **auth}
-    if not any(body.get(k) for k in ("content", "sender", "subject", "urls")):
-        raise click.UsageError("Give the message text, -f FILE, --sender/--subject or --url.")
+    if not any(body.get(k) for k in ("content", "sender", "subject", "urls", "reply_to")):
+        raise click.UsageError("Give the message text, -f FILE, --sender/--subject/--reply-to or --url.")
     cfg = _config(no_llm=no_llm, offline=offline, features=features, redact=None, trusted=trusted,
                   challenge_at=challenge_at, review_at=review_at, block_at=block_at)
     if cfg:
@@ -594,7 +695,7 @@ def _parse_raw_http(raw: str) -> Dict[str, Any]:
     for line in lines[1:]:
         if ":" in line:
             k, v = line.split(":", 1)
-            headers[k.strip()] = v.strip()
+            _add_header(headers, k.strip(), v.strip())
     req: Dict[str, Any] = {"method": parts[0], "url": parts[1], "headers": headers}
     if body.strip():
         req["body"] = body
@@ -629,11 +730,11 @@ def request_cmd(app: App, url: Optional[str], method: str, headers: Tuple[str, .
             name, sep, value = h.partition(":")
             if not sep:
                 raise click.BadParameter(f"expected 'Name: value', got {h!r}", param_hint="--header")
-            req["headers"][name.strip()] = value.strip()
+            _add_header(req["headers"], name.strip(), value.strip())
         if data is not None:
             body = _read_source(data[1:]) if data.startswith("@") else data
             try:
-                req["body"] = json.loads(body)
+                req["body"] = _loads_unambiguous(body)
             except ValueError:
                 req["body"] = body
     cfg = _config(no_llm=no_llm, offline=offline, features=features, redact=None, trusted=trusted,
@@ -663,18 +764,19 @@ def file_cmd(app: App, paths: Tuple[str, ...], mime: Optional[str], task: str, n
     cfg = _config(no_llm=no_llm, offline=offline, features=features, redact=None, trusted=trusted,
                   challenge_at=challenge_at, review_at=review_at, block_at=block_at)
     results: List[Dict[str, Any]] = []
+    error: Optional[IpxError] = None
     for path in paths:
-        full = os.path.expanduser(path)
-        if not os.path.isfile(full):
-            raise IpxError(f"File not found: {path}")
-        if os.path.getsize(full) > MAX_UPLOAD_BYTES:
-            raise IpxError(f"{path} is larger than 10 MB, the inspection limit.")
-        with open(full, "rb") as fh:
-            raw = fh.read()
-        spec: Dict[str, Any] = {"name": os.path.basename(full), "content_base64": base64.b64encode(raw).decode("ascii")}
+        raw = _read_bytes(path, MAX_UPLOAD_BYTES)
+        spec: Dict[str, Any] = {"name": os.path.basename(os.path.expanduser(path)), "content_base64": base64.b64encode(raw).decode("ascii")}
         if mime:
             spec["mime"] = mime
-        results.append({"input": path, **_post(app, "/ai-shield/scan", {"task": task, "file": spec, "config": cfg})})
+        try:
+            results.append({"input": path, **_post(app, "/ai-shield/scan", {"task": task, "file": spec, "config": cfg})})
+        except IpxError as e:
+            if not results:
+                raise
+            error = e
+            break
     if app.json:
         ui.emit_json(results[0] if len(results) == 1 else results)
     else:
@@ -684,6 +786,7 @@ def file_cmd(app: App, paths: Tuple[str, ...], mime: Optional[str], task: str, n
             ui.console.print(ui.make_table(["File", "Decision", "Risk"], [
                 (r["input"], _decision_text(str(r.get("decision"))), r.get("risk_score")) for r in results], title="Summary",
                 right=["Risk"]))
+    _finish(error, len(results), len(paths))
     worst = max((r.get("decision", "allow") for r in results), key=lambda d: DECISIONS.index(d) if d in DECISIONS else 0)
     _enforce(worst, fail_on)
 
@@ -704,8 +807,11 @@ def password_cmd(app: App, from_stdin: bool, email: Optional[str], username: Opt
     """Rate a password: common, patterned, leetspeak or personal passwords, estimated strength, and how often it
     appears in known breaches (Have I Been Pwned k-anonymity: only a 5-character hash prefix leaves Shield).
     The password is sent over TLS, never echoed, stored or shown to the LLM. Use --offline to skip the breach check."""
+    _require_secure_transport(app, "a password")
     if from_stdin:
-        pw = sys.stdin.read().rstrip("\r\n")
+        pw = sys.stdin.read(4097).rstrip("\r\n")
+        if len(pw) > 4096:
+            raise IpxError("Password input is longer than 4096 characters.")
     else:
         pw = ui.ask("Password to check", password=True)
     if not pw:
@@ -814,6 +920,7 @@ def domain_cmd(app: App, domains: Tuple[str, ...], wallet: Optional[str], no_llm
 
 CHECK_TYPES = ["email", "domain", "url", "ip", "phone", "username", "user_agent", "wallet", "jwt", "hash", "secret"]
 CHECK_BATCH = 500
+CHECK_LOOKUP_DEFAULT_MAX = 10  # lookups default to on only for small inputs, decided once per command
 VERDICT_STYLE = {"clean": ui.OK, "suspicious": ui.WARN, "malicious": ui.BAD}
 
 
@@ -832,19 +939,31 @@ def _gather_values(values: Tuple[str, ...], files: Tuple[str, ...]) -> List[str]
 def _run_check(app: App, kind: str, values: List[str], lookups: Optional[bool]) -> Dict[str, Any]:
     if not values:
         raise click.UsageError("Give one or more values, -f FILE (one per line), or pipe them on stdin.")
-    combined: Dict[str, Any] = {"type": kind, "results": []}
+    if kind in {"jwt", "secret"}:
+        _require_secure_transport(app, f"{kind} values")
+    combined: Dict[str, Any] = {"type": kind, "results": [], "error": None}
     app.require_login()
+    # Decide lookups once for the whole input, so every batch behaves the same (the server default is per request).
+    use_lookups = lookups if lookups is not None else len(values) <= CHECK_LOOKUP_DEFAULT_MAX
     chunks = [values[i:i + CHECK_BATCH] for i in range(0, len(values), CHECK_BATCH)]
     for n, chunk in enumerate(chunks, 1):
-        body: Dict[str, Any] = {"type": kind, "values": chunk}
-        if lookups is not None:
-            body["config"] = {"external_lookups": lookups}
-        with ui.status(f"Checking {len(chunk)} {kind} value(s)…" + (f" ({n}/{len(chunks)})" if len(chunks) > 1 else "")):
-            part = app.api.post("/ai-shield/check", body, timeout=120) or {}
+        body: Dict[str, Any] = {"type": kind, "values": chunk, "config": {**_policy_from_context(), "external_lookups": use_lookups}}
+        try:
+            with ui.status(f"Checking {len(chunk)} {kind} value(s)…" + (f" ({n}/{len(chunks)})" if len(chunks) > 1 else "")):
+                part = app.api.post("/ai-shield/check", body, timeout=120) or {}
+        except IpxError as e:
+            if not combined["results"]:
+                raise
+            combined["error"] = e
+            break
         combined["type"] = part.get("type", kind)
         combined["version"] = part.get("version")
         combined["results"].extend(part.get("results", []))
+    if kind in {"jwt", "secret"}:  # credentials are never echoed back to terminals, CSV files or CI logs
+        for i, r in enumerate(combined["results"], 1):
+            r["value"] = f"<{kind} #{i}>"
     combined["count"] = len(combined["results"])
+    combined["total"] = len(values)
     combined["summary"] = {v: sum(1 for r in combined["results"] if r.get("verdict") == v)
                            for v in ("clean", "suspicious", "malicious")}
     return combined
@@ -885,6 +1004,7 @@ def _csv_out(results: List[Dict[str, Any]]) -> None:
 @click.option("--csv", "as_csv", is_flag=True, help="Print results as CSV.")
 @click.option("--lookups/--no-lookups", default=None, help="Allow/forbid third-party reputation lookups (default: only for ≤10 values).")
 @click.option("--fail-on", type=click.Choice(DECISIONS), help=f"Exit with code {FAIL_EXIT_CODE} if any value is this decision or stricter.")
+@_policy_options
 @pass_app
 def check(app: App, kind: str, values: Tuple[str, ...], files: Tuple[str, ...], only_flagged: bool, as_csv: bool,
           lookups: Optional[bool], fail_on: Optional[str]) -> None:
@@ -894,6 +1014,9 @@ def check(app: App, kind: str, values: Tuple[str, ...], files: Tuple[str, ...], 
     narrow jobs: find disposable email domains in a signup list, triage an IOC list, audit JWTs, classify password
     hashes or spot leaked secrets. Inputs over 500 values are sent in batches."""
     kind = kind.lower()
+    if values and kind in {"jwt", "secret"}:
+        ui.warn(f"Values passed as arguments are visible to other users in the process list; pipe {kind} values on stdin "
+                "or use -f FILE instead.")
     result = _run_check(app, kind, _gather_values(values, files), lookups)
     rows = [r for r in result["results"] if not only_flagged or r.get("verdict") != "clean"]
     if app.json:
@@ -908,6 +1031,7 @@ def check(app: App, kind: str, values: Tuple[str, ...], files: Tuple[str, ...], 
         s = result["summary"]
         ui.console.print(Text.assemble((f"{result['count']} checked · ", "muted"), (f"{s['clean']} clean", ui.OK), (" · ", "muted"),
                                        (f"{s['suspicious']} suspicious", ui.WARN), (" · ", "muted"), (f"{s['malicious']} malicious", ui.BAD)))
+    _finish(result.get("error"), result["count"], result["total"])
     worst = max((r.get("decision", "allow") for r in result["results"]), key=lambda d: DECISIONS.index(d) if d in DECISIONS else 0,
                 default="allow")
     _enforce(worst, fail_on)
@@ -922,6 +1046,7 @@ def check(app: App, kind: str, values: Tuple[str, ...], files: Tuple[str, ...], 
 @click.option("-f", "--file", "files", multiple=True, metavar="PATH", help="File with one email or domain per line ('-' for stdin).")
 @click.option("--only-disposable", is_flag=True, help="Only list disposable addresses.")
 @click.option("--fail-if-found", is_flag=True, help=f"Exit with code {FAIL_EXIT_CODE} if any disposable address is found.")
+@_policy_options
 @pass_app
 def disposable(app: App, values: Tuple[str, ...], files: Tuple[str, ...], only_disposable: bool, fail_if_found: bool) -> None:
     """Shortcut for `ipx shield check email` that answers one question: is it a disposable email provider?
@@ -940,6 +1065,7 @@ def disposable(app: App, values: Tuple[str, ...], files: Tuple[str, ...], only_d
         if table:
             ui.console.print(ui.make_table(["Value", "Domain", "Result"], table, title="Disposable email check"))
         ui.console.print(Text.assemble((f"{result['count']} checked · ", "muted"), (f"{found} disposable", ui.BAD if found else ui.OK)))
+    _finish(result.get("error"), result["count"], result["total"])
     if fail_if_found and found:
         raise click.exceptions.Exit(FAIL_EXIT_CODE)
 

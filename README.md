@@ -73,7 +73,7 @@ a decision (`allow` · `challenge` · `rate_limit` · `review` · `block`), the 
 ipx shield tasks                                             # task profiles + thresholds (no sign-in)
 ipx shield scan -f prompt.txt --task prompt_guard --fail-on review   # exit 3 on review/block
 git diff | ipx shield scan --task dlp --fail-on review              # catch leaked keys before you push
-ipx -q shield scan -f transcript.txt --task dlp --redact > clean.txt # redacted copy only
+ipx -q shield scan -f transcript.txt --task dlp --redact > clean.txt # redacted copy only (-q goes before the command)
 ipx shield analyze --task login --email bob@acme.com -m failed_logins=30 -m user_agent=python-requests/2.31
 ipx shield url bit.ly/3abc https://paypa1.com/login --offline
 ipx shield request "/search?q=1' UNION SELECT 1--" -H "User-Agent: sqlmap/1.7"   # WAF-style request check

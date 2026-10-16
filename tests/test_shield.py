@@ -136,7 +136,7 @@ def test_phishing_parses_eml(ipx, tmp_path):
     eml.write_bytes(b"From: PayPal <alert@paypa1.com>\r\nReply-To: x@evil.top\r\nSubject: Locked\r\n"
                     b"Authentication-Results: mx.example; spf=fail smtp.mailfrom=paypa1.com; dmarc=fail\r\n"
                     b"Content-Type: text/plain\r\n\r\nVerify now at https://paypa1.com\r\n")
-    r = ipx("shield", "phishing", "-f", str(eml), "--fail-on", "block")
+    r = ipx("shield", "phishing", "-f", str(eml), "--fail-on", "block", "--trust-eml-auth")
     assert r.exit_code == 3, r.output
     assert "PHISHING" in r.output and "paypa1.com" in r.output
     body = ipx.fake.last("/ai-shield/detect-phishing")["json"]
@@ -385,3 +385,151 @@ def test_exit_codes_reach_the_process(ipx, monkeypatch):
         cli.main(["shield", "check", "email", "a@mailinator.com", "--fail-on", "challenge"])
     assert e.value.code == 3
     cli.main(["shield", "check", "email", "jane@gmail.com", "--fail-on", "challenge"])  # clean: returns normally
+
+
+# ── PR review fixes ────────────────────────────────────────────────────
+
+
+def test_eml_auth_results_are_not_trusted_by_default(ipx, tmp_path):
+    sign_in(ipx)
+    ipx.fake.route("POST", "/ai-shield/detect-phishing", lambda rec: (200, {}, {**CLEAN, "is_phishing": False, "threat_level": "low"}))
+    eml = tmp_path / "forged.eml"
+    eml.write_bytes(b"Authentication-Results: mx.mine.example; spf=fail; dmarc=fail\r\n"
+                    b"Authentication-Results: attacker.example; spf=pass; dkim=pass; dmarc=pass\r\n"
+                    b"From: PayPal <a@paypa1.com>\r\nSubject: Hi\r\n\r\nbody\r\n")
+    ipx("shield", "phishing", "-f", str(eml))
+    assert "authentication" not in ipx.fake.last("/ai-shield/detect-phishing")["json"]
+    ipx("shield", "phishing", "-f", str(eml), "--trust-eml-auth")  # only the topmost header (added by the last hop) counts
+    assert ipx.fake.last("/ai-shield/detect-phishing")["json"]["authentication"] == {"spf": "fail", "dmarc": "fail"}
+
+
+def test_phishing_accepts_reply_to_alone(ipx):
+    sign_in(ipx)
+    ipx.fake.route("POST", "/ai-shield/detect-phishing", lambda rec: (200, {}, {**CLEAN, "is_phishing": False, "threat_level": "low"}))
+    assert ipx("shield", "phishing", "--reply-to", "x@evil.top").exit_code == 0
+    assert ipx.fake.last("/ai-shield/detect-phishing")["json"]["reply_to"] == "x@evil.top"
+
+
+def test_password_refuses_plain_http_to_remote_hosts(ipx):
+    from ipx.errors import IpxError
+    sign_in(ipx)
+    with pytest.raises(IpxError, match="plain HTTP"):
+        ipx("--base-url", "http://api.example.com", "shield", "password", "--stdin", input="hunter2\n")
+    assert not [c for c in ipx.fake.calls if c["path"] == "/ai-shield/scan"]
+
+
+def test_secret_and_jwt_values_are_never_printed(ipx):
+    sign_in(ipx)
+    _check_route(ipx, lambda v: {"value": v, "verdict": "malicious", "decision": "block", "risk_score": 90,
+                                 "rules": ["jwt.alg_none"], "facts": {}})
+    token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJzZWNyZXQifQ."
+    for args in (["shield", "check", "jwt"], ["shield", "check", "jwt", "--csv"], ["--json", "shield", "check", "jwt"]):
+        r = ipx(*args, input=token + "\n")
+        assert token not in r.output and "eyJhbGci" not in r.output, args
+        assert "<jwt #1>" in r.output, args
+    assert token not in ipx("shield", "check", "jwt", token).output  # masked even when passed as an argument
+
+
+def test_redact_hides_sensitive_previews(ipx):
+    sign_in(ipx)
+    ipx.fake.route("POST", "/ai-shield/scan", lambda rec: (200, {}, {**CLEAN, "redacted_content": "key [REDACTED:AWS_ACCESS_KEY]",
+                                                                      "findings": {"sensitive_data": [{"kind": "aws_access_key", "preview": "AKIA…LE", "start": 4}]}}))
+    for args in (["shield", "scan", "x", "--redact"], ["--json", "shield", "scan", "x", "--redact"]):
+        r = ipx(*args)
+        assert "AKIA" not in r.output and "[redacted]" in r.output or "REDACTED" in r.output
+    assert "AKIA…LE" in ipx("shield", "scan", "x").output  # previews are still shown without --redact
+
+
+def test_duplicate_headers_are_kept_and_duplicate_json_keys_rejected(ipx):
+    from ipx.errors import IpxError
+    sign_in(ipx)
+    _scan_route(ipx)
+    ipx("shield", "request", "/x", "-H", "X-Test: a", "-H", "x-test: b")
+    assert ipx.fake.last("/ai-shield/scan")["json"]["request"]["headers"] == {"X-Test": "a, b"}
+    with pytest.raises(IpxError, match="duplicate key"):
+        ipx("shield", "request", "-X", "POST", "/x", "-d", '{"q": "ok", "q": "1\' OR \'1\'=\'1"}')
+
+
+def test_lookups_are_decided_once_for_all_batches(ipx, tmp_path):
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    f = tmp_path / "ips.txt"
+    f.write_text("\n".join(f"u{i}@gmail.com" for i in range(505)))
+    ipx("--json", "shield", "check", "email", "-f", str(f))
+    cfgs = [c["json"]["config"] for c in ipx.fake.calls if c["path"] == "/ai-shield/check"]
+    assert len(cfgs) == 2 and all(c["external_lookups"] is False for c in cfgs)  # the 5-value last batch must not differ
+    ipx("--json", "shield", "check", "email", "a@x.com")
+    assert ipx.fake.last("/ai-shield/check")["json"]["config"]["external_lookups"] is True
+
+
+def test_check_and_disposable_forward_policy(ipx, tmp_path):
+    sign_in(ipx)
+    _check_route(ipx, _email_result)
+    policy = tmp_path / "p.json"
+    policy.write_text(json.dumps({"blocklists": {"email_domains": ["rival.com"]}, "custom_rules": [{"id": "r", "keywords": ["x"]}]}))
+    ipx("shield", "check", "email", "a@gmail.com", "--block", "countries=KP", "--policy", str(policy), "--allow", "emails=a@gmail.com")
+    cfg = ipx.fake.last("/ai-shield/check")["json"]["config"]
+    assert cfg["blocklists"] == {"email_domains": ["rival.com"], "countries": ["KP"]}
+    assert cfg["allowlists"] == {"emails": ["a@gmail.com"]} and cfg["custom_rules"][0]["id"] == "r"
+    ipx("shield", "disposable", "a@gmail.com", "--block", "email_domains=gmail.com")
+    assert ipx.fake.last("/ai-shield/check")["json"]["config"]["blocklists"] == {"email_domains": ["gmail.com"]}
+
+
+def test_completed_results_survive_a_later_failure(ipx, tmp_path):
+    """Quota was spent on the first batch, so its results must be printed before the later error is raised."""
+    from click.testing import CliRunner
+
+    from ipx.cli import root
+    from ipx.errors import ApiError
+
+    sign_in(ipx)
+    n = {"calls": 0}
+
+    def handler(rec):
+        n["calls"] += 1
+        if n["calls"] == 2:
+            return 500, {}, {"detail": "boom"}
+        vals = rec["json"]["values"]
+        return 200, {}, {"type": "email", "count": len(vals), "results": [_email_result(v) for v in vals]}
+
+    ipx.fake.route("POST", "/ai-shield/check", handler)
+    f = tmp_path / "big.txt"
+    f.write_text("\n".join(f"u{i}@mailinator.com" for i in range(600)))
+    r = CliRunner().invoke(root, ["--json", "shield", "check", "email", "-f", str(f)], catch_exceptions=True)
+    assert isinstance(r.exception, ApiError)
+    assert r.output.count("@mailinator.com") == 500  # all of batch one was emitted
+    assert "Stopped after 500 of 600" in r.output
+
+    seq = {"n": 0}
+    f1, f2 = tmp_path / "a.txt", tmp_path / "b.txt"
+    f1.write_text("hello")
+    f2.write_text("again")
+
+    def scan_handler(rec):
+        seq["n"] += 1
+        return (500, {}, {"detail": "boom"}) if seq["n"] == 2 else (200, {}, {**CLEAN, "task": "prompt_guard"})
+
+    ipx.fake.route("POST", "/ai-shield/scan", scan_handler)
+    r = CliRunner().invoke(root, ["shield", "scan", "-f", str(f1), "-f", str(f2)], catch_exceptions=True)
+    assert isinstance(r.exception, ApiError) and "AI Shield" in r.output and "Decision" in r.output
+    assert "Stopped after 1 of 2" in r.output
+
+
+def test_unreadable_oversized_and_invalid_inputs_are_clean_errors(ipx, tmp_path):
+    from ipx.errors import IpxError
+    sign_in(ipx)
+    _scan_route(ipx)
+    with pytest.raises(IpxError, match="not a regular file|Cannot read"):
+        ipx("shield", "scan", "-f", str(tmp_path))  # a directory
+    with pytest.raises(IpxError, match="larger than"):
+        ipx("shield", "scan", "-f", "-", input="x" * 2_500_000)
+    big = tmp_path / "big.txt"
+    big.write_bytes(b"x" * 2_500_000)
+    with pytest.raises(IpxError, match="larger than"):
+        ipx("shield", "scan", "-f", str(big))
+    bad = tmp_path / "meta.json"
+    bad.write_text("{nope")
+    with pytest.raises(IpxError, match="not valid JSON"):
+        ipx("shield", "analyze", "--email", "a@b.com", "--meta-file", str(bad))
+    with pytest.raises(IpxError, match="File not found"):
+        ipx("shield", "file", str(tmp_path / "missing.bin"))
