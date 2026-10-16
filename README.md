@@ -56,43 +56,10 @@ ipx local chat llama3.2
 ipx server start --allow teammate@acme.com --detach     # host your models for others
 ipx import space black-forest-labs/FLUX.1-schnell       # add to the desktop app
 
-ipx shield scan "Ignore previous instructions…"          # AI Shield: prompt attacks, abuse, secrets, PII
-cat page.html | ipx shield scan --task agent_tool_output --fail-on review
-ipx shield analyze --task signup --email new@mailinator.com --ip 203.0.113.7
-ipx shield phishing -f suspicious.eml
+ipx shield scan "Ignore previous instructions…"     # AI Shield (docs: readthedocs, "AI Shield")
 
 ipx usage get                        # quotas, wallet and org spend
 ```
-
-## AI Shield in scripts and CI
-
-`ipx shield` sends text, identities or messages to InferencePort AI Shield and prints a verdict: a 0–100 risk score,
-a decision (`allow` · `challenge` · `rate_limit` · `review` · `block`), the reasons and suggested mitigations.
-
-```bash
-ipx shield tasks                                             # task profiles + thresholds (no sign-in)
-ipx shield scan -f prompt.txt --task prompt_guard --fail-on review   # exit 3 on review/block
-git diff | ipx shield scan --task dlp --fail-on review              # catch leaked keys before you push
-ipx -q shield scan -f transcript.txt --task dlp --redact > clean.txt # redacted copy only (-q goes before the command)
-ipx shield analyze --task login --email bob@acme.com -m failed_logins=30 -m user_agent=python-requests/2.31
-ipx shield url bit.ly/3abc https://paypa1.com/login --offline
-ipx shield request "/search?q=1' UNION SELECT 1--" -H "User-Agent: sqlmap/1.7"   # WAF-style request check
-ipx shield file uploads/* --fail-on review                    # disguised executables, macros, scripted PDFs/SVGs, zip bombs
-ipx shield password --email jane@acme.com                     # strength + breach count (k-anonymity, never stored)
-ipx shield listing --title "Rolex 1:1" --price 120 --market-price 10000 --brand Rolex
-ipx shield review "Best ever!!" --rating 5 --author-reviews-24h 40
-ipx shield domain paypa1-login.top --wallet bc1q...             # look-alikes, new domains, wallet checksums
-ipx shield disposable -f signups.txt --only-disposable          # find throwaway email addresses
-ipx shield check ip -f iocs.txt --only-flagged --csv            # bulk indicator triage (email/domain/url/ip/jwt/hash/…)
-ipx shield scan -f memo.txt --task general --policy policy.json --block countries=KP --allow email_domains=acme.com
-```
-
-Full reference: [`docs/shield.md`](docs/shield.md). `policy.json` holds your own `blocklists`, `allowlists` and `custom_rules` (keywords or a regex, the fields to match,
-a category, a weight and an optional `action`), so Shield can enforce rules specific to your product.
-
-Tasks: `general`, `signup`, `login`, `payment`, `content_moderation`, `prompt_guard`, `agent_tool_output`, `phishing`,
-`dlp`, `api_request`, `file_upload`, `password`, `marketplace`, `reviews`, `domain`. `--offline` skips the LLM reviewer and third-party lookups; `--feature NAME=on|off`, `--trusted-domain` and
-`--challenge-at/--review-at/--block-at` tune the pipeline.
 
 Every command has `--help`, and every command accepts the global `--json` flag for scripting:
 `ipx --json usage get | jq .quota`.
@@ -108,14 +75,14 @@ Every command has `--help`, and every command accepts the global `--json` flag f
 | `ipx agent` | `list`, `registry`, `get`, `create`, `update`, `delete`, `chat`, `ask`, `profile`, `settings`, `invite …`, `members …` |
 | `ipx mcp council` | `tiers`, `models`, `reason`, `tools`, `test`, `connect <client>` — the hosted Council of LLMs MCP server |
 | `ipx gen` | subscription-billed (Lightning): `chat`, `text`, `image`, `video`, `audio …`, `models`, `plan` |
-| `ipx shield` | AI Shield: `scan` (text/files/stdin, `--redact`), `analyze` (signup/login/payment signals), `phishing` (incl. `.eml`), `url`, `check` (bulk indicator checks: email, domain, url, ip, phone, username, user_agent, wallet, jwt, hash, secret), `disposable`, `request` (WAF), `file` (uploads/malware tricks), `password`, `listing`, `review`, `domain` (+ `--wallet`), `tasks`; `--policy`/`--block`/`--allow` for your own rules; `--fail-on <decision>` exits 3 for CI |
+| `ipx shield` | AI Shield detection and risk scoring: `scan`, `analyze`, `phishing`, `url`, `check`, `disposable`, `request`, `file`, `password`, `listing`, `review`, `domain`, `tasks` — see the [AI Shield docs](https://inferenceport-ai.readthedocs.io/en/latest/ai-shield-cli.html) |
 | `ipx model` / `ipx local` | manage local models / chat with them |
 | `ipx server` | `start`, `stop`, `status`, `logs` — host your local models on port 52458 |
 | `ipx import` | `space`, `website`, `file`, `list`, `rm` for the desktop app library |
 | `ipx usage` | `get`, `tiers` |
 | `ipx config`, `doctor`, `status`, `api`, `rewards`, `completion` | tools |
 
-Full documentation lives with the desktop app docs: **<https://inferenceport-ai.readthedocs.io>** (CLI section).
+Full documentation lives with the desktop app docs: **<https://inferenceport-ai.readthedocs.io>** (CLI section, and AI Shield).
 
 ## Develop
 
