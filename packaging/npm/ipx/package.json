@@ -1,5 +1,5 @@
 {
-  "name": "@inferenceport/ipx",
+  "name": "@inferenceport-ai/ipx",
   "version": "0.1.0",
   "description": "ipx - the InferencePort AI command line (cloud, organizations, local models, host server). Ships a native binary; no Python needed.",
   "license": "Apache-2.0",
