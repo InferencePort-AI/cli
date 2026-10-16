@@ -19,6 +19,7 @@ from ipx import realtime as rt
 from ipx import ws as wsmod
 from ipx.app import App, pass_app
 from ipx.clickx import IpxGroup
+from ipx.config import replace_file
 from ipx.errors import IpxError
 
 DEFAULT_EMBED_MODEL = "text-embedding-3-small"
@@ -36,7 +37,7 @@ def write_atomic(path: str, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import os
 import struct
 import threading
 import time
@@ -913,3 +914,31 @@ def test_embed_dimension_floor(ipx):
     sign_in(ipx)
     r = ipx("p2g", "embed", "x", "--dimensions", "64")
     assert r.exit_code == 2 and "128" in r.output
+
+
+def test_replace_file_retries_transient_windows_permission_errors(tmp_path, monkeypatch):
+    from ipx import config
+
+    calls = {"n": 0}
+    real = os.replace
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 4:
+            raise PermissionError(13, "Access is denied")
+        return real(src, dst)
+
+    src, dst = tmp_path / "a", tmp_path / "b"
+    src.write_text("x")
+    monkeypatch.setattr(config.os, "replace", flaky)
+    monkeypatch.setattr(config.sys, "platform", "win32")
+    monkeypatch.setattr(config.time, "sleep", lambda s: None)
+    config.replace_file(str(src), str(dst))
+    assert dst.read_text() == "x" and calls["n"] == 4
+    # on POSIX a PermissionError is a real error and is not retried
+    monkeypatch.setattr(config.sys, "platform", "linux")
+    calls["n"] = 0
+    src.write_text("y")
+    with pytest.raises(PermissionError):
+        config.replace_file(str(src), str(dst))
+    assert calls["n"] == 1

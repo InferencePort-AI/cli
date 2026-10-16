@@ -80,6 +80,22 @@ def _read_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
+def replace_file(src: str, dst: str, attempts: int = 100) -> None:
+    """``os.replace`` that tolerates Windows' transient ``PermissionError`` when another writer is replacing ``dst``.
+
+    On POSIX the first attempt always succeeds. On Windows a replace can fail while a concurrent one is in flight, so
+    retry briefly before giving up.
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or attempt == attempts - 1:
+                raise
+            time.sleep(0.01 + 0.005 * min(attempt, 20))
+
+
 def _write_json(path: Path, data: Dict[str, Any], private: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # A unique temporary file per writer: two `ipx` processes saving at once (for example refreshing the same login)
@@ -90,7 +106,7 @@ def _write_json(path: Path, data: Dict[str, Any], private: bool = False) -> None
             json.dump(data, fh, indent=2)
         if not private:
             os.chmod(tmp, 0o644)
-        os.replace(tmp, str(path))
+        replace_file(tmp, str(path))
     except BaseException:
         try:
             os.unlink(tmp)
