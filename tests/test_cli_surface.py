@@ -36,6 +36,8 @@ def test_all_commands_render_help(ipx):
     ("gen", "chat"), ("gen", "text"), ("gen", "image"), ("gen", "video"), ("gen", "audio", "sfx"), ("gen", "plan"),
     ("server", "start"), ("server", "stop"), ("server", "status"), ("server", "logs"),
     ("usage", "get"), ("model", "pull"), ("model", "list"), ("local", "chat"), ("import", "space"), ("import", "website"),
+    ("featherless", "deploy"), ("featherless", "list"), ("featherless", "terminate"), ("featherless", "uncancel"), ("agent", "create"), ("agent", "chat"),
+    ("agent", "invite", "accept"), ("agent", "members", "role"), ("mcp", "council", "reason"), ("mcp", "council", "tiers"), ("mcp", "council", "connect"),
     ("config", "set"), ("doctor",), ("status",), ("api",), ("completion",),
 ])
 def test_documented_commands_exist(path):
