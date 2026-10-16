@@ -73,10 +73,20 @@ git diff | ipx shield scan --task dlp --fail-on review              # catch leak
 ipx -q shield scan -f transcript.txt --task dlp --redact > clean.txt # redacted copy only
 ipx shield analyze --task login --email bob@acme.com -m failed_logins=30 -m user_agent=python-requests/2.31
 ipx shield url bit.ly/3abc https://paypa1.com/login --offline
+ipx shield request "/search?q=1' UNION SELECT 1--" -H "User-Agent: sqlmap/1.7"   # WAF-style request check
+ipx shield file uploads/* --fail-on review                    # disguised executables, macros, scripted PDFs/SVGs, zip bombs
+ipx shield password --email jane@acme.com                     # strength + breach count (k-anonymity, never stored)
+ipx shield listing --title "Rolex 1:1" --price 120 --market-price 10000 --brand Rolex
+ipx shield review "Best ever!!" --rating 5 --author-reviews-24h 40
+ipx shield domain paypa1-login.top --wallet bc1q...             # look-alikes, new domains, wallet checksums
+ipx shield scan -f memo.txt --task general --policy policy.json --block countries=KP --allow email_domains=acme.com
 ```
 
+`policy.json` holds your own `blocklists`, `allowlists` and `custom_rules` (keywords or a regex, the fields to match,
+a category, a weight and an optional `action`), so Shield can enforce rules specific to your product.
+
 Tasks: `general`, `signup`, `login`, `payment`, `content_moderation`, `prompt_guard`, `agent_tool_output`, `phishing`,
-`dlp`. `--offline` skips the LLM reviewer and third-party lookups; `--feature NAME=on|off`, `--trusted-domain` and
+`dlp`, `api_request`, `file_upload`, `password`, `marketplace`, `reviews`, `domain`. `--offline` skips the LLM reviewer and third-party lookups; `--feature NAME=on|off`, `--trusted-domain` and
 `--challenge-at/--review-at/--block-at` tune the pipeline.
 
 Every command has `--help`, and every command accepts the global `--json` flag for scripting:
@@ -90,7 +100,7 @@ Every command has `--help`, and every command accepts the global `--json` flag f
 | `ipx org` | members, invitations, teams, API keys, billing, usage, audit, domains, SSO, policy, desktop policy |
 | `ipx p2g` | credit-billed: `chat`, `text`, `image`, `video`, `audio …`, `3d`, `models`, `balance`, `ledger`, `keys`, `deploy` |
 | `ipx gen` | subscription-billed (Lightning): `chat`, `text`, `image`, `video`, `audio …`, `models`, `plan` |
-| `ipx shield` | AI Shield: `scan` (text/files/stdin, `--redact`), `analyze` (signup/login/payment signals), `phishing` (incl. `.eml`), `url`, `tasks`; `--fail-on <decision>` exits 3 for CI |
+| `ipx shield` | AI Shield: `scan` (text/files/stdin, `--redact`), `analyze` (signup/login/payment signals), `phishing` (incl. `.eml`), `url`, `request` (WAF), `file` (uploads/malware tricks), `password`, `listing`, `review`, `domain` (+ `--wallet`), `tasks`; `--policy`/`--block`/`--allow` for your own rules; `--fail-on <decision>` exits 3 for CI |
 | `ipx model` / `ipx local` | manage local models / chat with them |
 | `ipx server` | `start`, `stop`, `status`, `logs` — host your local models on port 52458 |
 | `ipx import` | `space`, `website`, `file`, `list`, `rm` for the desktop app library |

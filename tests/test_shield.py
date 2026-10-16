@@ -181,4 +181,112 @@ def test_tasks_is_public(ipx):
 def test_aliases(ipx):
     assert ipx("shield", "check", "--help").exit_code == 0
     assert ipx("shield", "detect-phishing", "--help").exit_code == 0
-    assert "check" not in ipx("shield", "--help").output
+    import re
+    out = ipx("shield", "--help").output
+    for alias in ("check", "waf", "upload", "wallet", "detect-phishing", "capabilities"):
+        assert not re.search(rf"^\s+{alias}\s", out, re.M), alias
+    assert ipx("shield", "waf", "--help").exit_code == 0
+
+
+# ── non-AI commands ───────────────────────────────────────────────────
+
+
+def _scan_route(ipx, extra=None):
+    ipx.fake.route("POST", "/ai-shield/scan", lambda rec: (200, {}, {**VERDICT, **(extra or {}), "task": rec["json"].get("task")}))
+
+
+def test_request_command_builds_request(ipx, tmp_path):
+    sign_in(ipx)
+    _scan_route(ipx, {"findings": {"request": {"method": "POST", "path": "/api", "parameters": 1, "headers": 1}}})
+    r = ipx("shield", "request", "-X", "post", "/api", "-H", "User-Agent: sqlmap/1.7", "-d", '{"url": "http://169.254.169.254/"}',
+            "--fail-on", "block")
+    assert r.exit_code == 3, r.output
+    body = ipx.fake.last("/ai-shield/scan")["json"]
+    assert body["task"] == "api_request"
+    assert body["request"] == {"method": "POST", "url": "/api", "headers": {"User-Agent": "sqlmap/1.7"},
+                               "body": {"url": "http://169.254.169.254/"}}
+    assert "Request POST /api" in r.output
+
+    raw = tmp_path / "req.http"
+    raw.write_text("GET /.env HTTP/1.1\r\nHost: x\r\nUser-Agent: curl/8\r\n\r\n")
+    ipx("shield", "request", "--raw", str(raw))
+    req = ipx.fake.last("/ai-shield/scan")["json"]["request"]
+    assert req["method"] == "GET" and req["url"] == "/.env" and req["headers"]["User-Agent"] == "curl/8"
+
+
+def test_request_bad_header(ipx):
+    sign_in(ipx)
+    assert ipx("shield", "request", "/x", "-H", "nocolon").exit_code == 2
+
+
+def test_file_command_sends_base64(ipx, tmp_path):
+    import base64
+    sign_in(ipx)
+    _scan_route(ipx, {"findings": {"files": [{"name": "a.pdf.exe", "detected_type": "exe", "size": 4}]}})
+    f = tmp_path / "a.pdf.exe"
+    f.write_bytes(b"MZ\x90\x00")
+    r = ipx("shield", "file", str(f), "--mime", "application/pdf")
+    assert r.exit_code == 0, r.output
+    spec = ipx.fake.last("/ai-shield/scan")["json"]["file"]
+    assert spec["name"] == "a.pdf.exe" and base64.b64decode(spec["content_base64"]) == b"MZ\x90\x00"
+    assert spec["mime"] == "application/pdf"
+    assert "a.pdf.exe" in r.output and "exe" in r.output
+
+
+def test_file_command_missing_file(ipx):
+    from ipx.errors import IpxError
+    sign_in(ipx)
+    with pytest.raises(IpxError):
+        ipx("shield", "file", "/nope/missing.bin")
+
+
+def test_password_command_never_echoes(ipx):
+    sign_in(ipx)
+    _scan_route(ipx, {"findings": {"password": {"strength": "weak", "estimated_bits": 20, "length": 7, "breach_count": 3000}}})
+    r = ipx("shield", "password", "--stdin", "--email", "jane@acme.com", "--offline", input="letmein\n")
+    assert r.exit_code == 0, r.output
+    body = ipx.fake.last("/ai-shield/scan")["json"]
+    assert body["password"] == "letmein" and body["task"] == "password" and body["email"] == "jane@acme.com"
+    assert body["config"]["features"]["llm_reasoning"] is False and body["config"]["features"]["external_lookups"] is False
+    assert "letmein" not in r.output
+    assert "3,000 breaches" in r.output
+
+
+def test_listing_review_domain_commands(ipx):
+    sign_in(ipx)
+    _scan_route(ipx, {"findings": {"domains": [{"domain": "paypa1.top", "age_days": 3}], "wallet": {"chain": "bitcoin", "checksum_valid": False}}})
+    assert ipx("shield", "listing", "--title", "Rolex 1:1", "--price", "120", "--market-price", "10000", "--brand", "Rolex").exit_code == 0
+    assert ipx.fake.last("/ai-shield/scan")["json"]["listing"] == {"title": "Rolex 1:1", "price": 120.0, "market_price": 10000.0,
+                                                                   "brand": "Rolex"}
+    assert ipx("shield", "review", "Great!!", "--rating", "5", "--unverified", "--by-seller").exit_code == 0
+    assert ipx.fake.last("/ai-shield/scan")["json"]["review"] == {"text": "Great!!", "rating": 5.0, "verified_purchase": False,
+                                                                  "author_is_seller": True}
+    r = ipx("shield", "domain", "paypa1.top", "--wallet", "bc1qbad")
+    assert r.exit_code == 0, r.output
+    body = ipx.fake.last("/ai-shield/scan")["json"]
+    assert body["domains"] == ["paypa1.top"] and body["wallet"] == "bc1qbad" and body["task"] == "domain"
+    assert "registered 3 days ago" in r.output and "checksum FAILED" in r.output
+    assert ipx("shield", "domain").exit_code == 2
+
+
+def test_policy_file_and_list_flags(ipx, tmp_path):
+    sign_in(ipx)
+    _scan_route(ipx, {"warnings": ["bad: nested quantifiers are not allowed"]})
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({"custom_rules": [{"id": "atlas", "keywords": ["project-atlas"], "action": "review"}],
+                                  "blocklists": {"keywords": ["foo"]}}))
+    r = ipx("shield", "scan", "hello", "--policy", str(policy), "--block", "countries=KP,IR", "--allow", "email-domains=acme.com")
+    assert r.exit_code == 0, r.output
+    cfg = ipx.fake.last("/ai-shield/scan")["json"]["config"]
+    assert cfg["custom_rules"][0]["id"] == "atlas"
+    assert cfg["blocklists"] == {"keywords": ["foo"], "countries": ["KP", "IR"]}
+    assert cfg["allowlists"] == {"email_domains": ["acme.com"]}
+    assert "nested quantifiers" in r.output
+
+
+def test_policy_validation_errors(ipx, tmp_path):
+    sign_in(ipx)
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"rules": []}')
+    assert ipx("shield", "scan", "x", "--policy", str(bad)).exit_code == 2
+    assert ipx("shield", "scan", "x", "--block", "planets=mars").exit_code == 2
