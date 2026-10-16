@@ -47,6 +47,9 @@ ipx p2g balance
 ipx org members list                 # organizations
 ipx org invite create dev@acme.com --role admin
 ipx org keys create ci --monthly-limit 25
+ipx featherless deploy Qwen/Qwen2.5-7B-Instruct   # personal, or for the org with `-O acme`
+ipx agent chat acme-bot/support      # managed agents
+ipx mcp council reason "…" --tier basic   # Council of LLMs MCP
 
 ipx model pull llama3.2              # local models (same engine as the desktop app)
 ipx local chat llama3.2
@@ -66,6 +69,9 @@ Every command has `--help`, and every command accepts the global `--json` flag f
 | `ipx auth` | `login`, `logout`/`signout`, `status`/`whoami`, `context <org>`, `token` |
 | `ipx org` | members, invitations, teams, API keys, billing, usage, audit, domains, SSO, policy, desktop policy |
 | `ipx p2g` | credit-billed: `chat`, `text`, `image`, `video`, `audio …`, `3d`, `models`, `balance`, `ledger`, `keys`, `deploy` |
+| `ipx featherless` | `models`, `status`, `list`, `get`, `deploy`, `cancel`, `restore`, `terminate`, `usage` — personal deployments, or the organization's with an org context |
+| `ipx agent` | `list`, `registry`, `get`, `create`, `update`, `delete`, `chat`, `ask`, `profile`, `settings`, `invite …`, `members …` |
+| `ipx mcp council` | `tiers`, `models`, `reason`, `tools`, `test`, `connect <client>` — the hosted Council of LLMs MCP server |
 | `ipx gen` | subscription-billed (Lightning): `chat`, `text`, `image`, `video`, `audio …`, `models`, `plan` |
 | `ipx model` / `ipx local` | manage local models / chat with them |
 | `ipx server` | `start`, `stop`, `status`, `logs` — host your local models on port 52458 |
