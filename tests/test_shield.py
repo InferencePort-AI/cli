@@ -538,3 +538,4 @@ def test_unreadable_oversized_and_invalid_inputs_are_clean_errors(ipx, tmp_path)
         ipx("shield", "analyze", "--email", "a@b.com", "--meta-file", str(bad))
     with pytest.raises(IpxError, match="File not found"):
         ipx("shield", "file", str(tmp_path / "missing.bin"))
+
