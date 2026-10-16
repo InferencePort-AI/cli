@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "ipx - the InferencePort AI command line (cloud, organizations, local models, host server). Ships a native binary; no Python needed.",
   "license": "Apache-2.0",
-  "homepage": "https://inferenceport-ai.readthedocs.io",
+  "homepage": "https://inferenceport.ai",
   "repository": { "type": "git", "url": "git+https://github.com/inferenceport-ai/cli.git" },
   "bugs": { "url": "https://github.com/inferenceport-ai/cli/issues" },
   "keywords": ["inferenceport", "ai", "cli", "llm", "ollama"],
