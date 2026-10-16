@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
+from rich.markup import escape
 
 from ipx import ui
 from ipx.app import App, pass_app
@@ -165,8 +167,8 @@ def connect(app: App, client: str) -> None:
     url = council_url(app.api.base_url)
     headers = {"X-InferencePort-Org": app.org} if app.org else {}
     if client == "claude-code":
-        hdr = "".join(f' --header "{k}: {v}"' for k, v in headers.items())
-        text = f"claude mcp add --transport http council {url}{hdr}"
+        hdr = "".join(f" --header {shlex.quote(f'{k}: {v}')}" for k, v in headers.items())
+        text = f"claude mcp add --transport http council {shlex.quote(url)}{hdr}"
     elif client == "claude-desktop":
         text = json.dumps({"mcpServers": {"council": {"command": "npx", "args": ["-y", "mcp-remote", url] + [x for k, v in headers.items() for x in ("--header", f"{k}:{v}")]}}}, indent=2)
     else:
@@ -174,7 +176,7 @@ def connect(app: App, client: str) -> None:
         if headers:
             server["headers"] = headers
         text = json.dumps({"servers" if client == "vscode" else "mcpServers": {"council": server}}, indent=2)
-    app.out({"client": client, "url": url, "config": text}, lambda _: (ui.console.print(f"[muted]# {client} · billed to {'org ' + app.org if app.org else 'your personal wallet'}[/muted]"), sys.stdout.write(text + "\n")))
+    app.out({"client": client, "url": url, "config": text}, lambda _: (ui.err.print(f"[muted]{client} · billed to {'org ' + escape(app.org) if app.org else 'your personal wallet'}[/muted]", markup=True, highlight=False) if not ui.STATE["quiet"] else None, sys.stdout.write(text + "\n")))
 
 
 COMMANDS = [group]

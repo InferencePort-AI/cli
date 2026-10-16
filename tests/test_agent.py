@@ -33,8 +33,10 @@ def test_create_builds_body(ipx, tmp_path):
 
 def test_bad_mcp_pair_rejected(ipx):
     sign_in(ipx)
-    with pytest.raises(IpxError):
+    ipx.fake.route("POST", "/v1/agents", status=201, body={"model_id": "agent/u/x1"})  # would succeed if validation were missing
+    with pytest.raises(IpxError) as e:
         ipx("agent", "create", "x1", "--name", "X", "-m", "lightning", "--mcp", "nourl")
+    assert "NAME=URL" in (e.value.hint or "") and not ipx.fake.calls
 
 
 def test_bare_id_resolves_username_and_update_only_sends_changes(ipx):

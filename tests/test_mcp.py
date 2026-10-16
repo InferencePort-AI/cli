@@ -94,8 +94,10 @@ def test_tool_error_surfaces_server_message(ipx):
 
 def test_reason_needs_a_problem(ipx):
     sign_in(ipx)
-    with pytest.raises(IpxError):
+    mcp_server(ipx, {"council_reason": ANSWER})  # would answer if the check were missing
+    with pytest.raises(IpxError) as e:
         ipx("mcp", "council", "reason")
+    assert e.value.message == "No problem given." and not ipx.fake.calls
 
 
 def test_connect_snippets_include_org(ipx):
@@ -103,3 +105,34 @@ def test_connect_snippets_include_org(ipx):
     assert "claude mcp add --transport http council" in ipx("mcp", "council", "connect").output
     out = ipx("-O", "acme", "mcp", "council", "connect", "cursor").output
     assert '"X-InferencePort-Org": "acme"' in out and "/mcp/council/" in out
+
+
+def test_connect_quotes_shell_metacharacters(ipx):
+    import shlex
+
+    sign_in(ipx)
+    out = ipx("-O", 'x"; touch /tmp/pwned; "', "mcp", "council", "connect", "claude-code").output
+    line = next(ln for ln in out.splitlines() if ln.startswith("claude mcp add"))
+    argv = shlex.split(line)
+    assert argv[:6] == ["claude", "mcp", "add", "--transport", "http", "council"] and len(argv) == 9
+    assert argv[-1] == 'X-InferencePort-Org: x"; touch /tmp/pwned; "'
+
+
+def test_rejected_token_refreshes_once_and_retries(ipx):
+    from ipx.config import Credentials
+
+    sign_in(ipx)
+    state = {"calls": 0}
+    mcp_server(ipx, {"council_list_tiers": TIERS})
+    ok = ipx.fake.routes[("POST", "/mcp/council/")]
+
+    def flaky(rec):
+        if rec["headers"].get("authorization") == "Bearer tok_abc":
+            state["calls"] += 1
+            return 401, {}, {"detail": "token rejected"}
+        return ok(rec)
+
+    ipx.fake.route("POST", "/mcp/council/", flaky)
+    ipx.fake.route("POST", "/sb/auth/v1/token", body={"access_token": "tok_new", "refresh_token": "rt_2", "expires_at": 4102444800, "user": {"id": "u1", "email": "me@example.com"}})
+    assert "Basic" in ipx("mcp", "council", "tiers").output
+    assert state["calls"] == 1 and Credentials().access_token == "tok_new"

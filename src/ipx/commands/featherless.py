@@ -71,8 +71,15 @@ def state_text(s: Any) -> Text:
 
 
 def deployments_of(d: Any) -> List[Dict[str, Any]]:
-    rows = d.get("data") if isinstance(d, dict) else d
+    """Rows from a list response, whatever the envelope (bare list, or data/deployments/models/items)."""
+    rows = d
+    if isinstance(d, dict):
+        rows = next((d[k] for k in ("data", "deployments", "models", "items") if isinstance(d.get(k), list)), [])
     return [x for x in (rows or []) if isinstance(x, dict)]
+
+
+def meta_of(d: Any) -> Dict[str, Any]:
+    return d if isinstance(d, dict) else {}
 
 
 def show_deployment(x: Dict[str, Any], title: Optional[str] = None) -> None:
@@ -114,14 +121,15 @@ def models(app: App, search: Optional[str], page: int, limit: int) -> None:
     """Search the catalog of deployable models with their prices (no sign-in needed)."""
     d = app.api.get("/v1/deploy/models", params={"search": search, "page": page, "limit": limit}, auth=False, org=False) or {}
 
-    def render(d: Dict[str, Any]) -> None:
+    def render(d: Any) -> None:
         rows = []
+        meta = meta_of(d)
         for m in deployments_of(d):
             ours = m.get("our_pricing_per_million") or {}
             rows.append((m.get("featherless_model_id") or m.get("id"), f"{int(m['context_length']):,}" if m.get("context_length") else "—",
                          money(ours.get("input")), money(ours.get("output"))))
         ui.console.print(ui.make_table(["Model", "Context", "In $/M", "Out $/M"], rows,
-                                       title=f"Featherless models · {d.get('total', len(rows)):,} found · page {d.get('page', page)}/{d.get('total_pages', 1)}",
+                                       title=f"Featherless models · {meta.get('total', len(rows)):,} found · page {meta.get('page', page)}/{meta.get('total_pages', 1)}",
                                        right=["Context", "In $/M", "Out $/M"]))
 
     app.out(d, render)
@@ -152,12 +160,12 @@ def list_(app: App, show_all: bool) -> None:
             ui.info(f"No {'' if show_all else 'active '}deployments for {owner_label(app)}. Deploy one with `ipx featherless deploy <model>`.")
             return
         ui.console.print(ui.make_table(
-            ["ID", "Model", "Status", "State", "Fee", "Renews"],
-            [(x.get("id"), x.get("featherless_model_id"), status_text(x.get("status")), state_text(x.get("model_state")) if x.get("model_state") else "—",
+            ["ID", "Call as", "Status", "State", "Fee", "Renews"],
+            [(x.get("id"), x.get("display_model_id") or hf(str(x.get("featherless_model_id") or "")), status_text(x.get("status")), state_text(x.get("model_state")) if x.get("model_state") else "—",
               money(x.get("monthly_fee")), date(x.get("billing_cycle_end"))) for x in shown],
             title=f"Featherless deployments · {owner_label(app)} ({len(shown)})"))
 
-    app.out(d if show_all else {**d, "data": shown, "total": len(shown)}, render)
+    app.out(d if show_all else {**meta_of(d), "data": shown, "total": len(shown)}, render)
 
 
 @group.command("get", short_help="Show one deployment")

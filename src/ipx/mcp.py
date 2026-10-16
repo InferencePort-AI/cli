@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from ipx import __version__
 from ipx.app import App
-from ipx.errors import IpxError
+from ipx.errors import ApiError, IpxError
 from ipx.http import ORG_HEADER, raw_request
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -73,9 +73,20 @@ class McpClient:
         return h
 
     def _post(self, payload: Dict[str, Any]):
-        self.app.api.require_auth()
-        self.app.api._maybe_refresh()
-        return raw_request("POST", self.url, json=payload, headers=self._headers(), timeout=self.timeout)
+        t = self.app.api
+        t.require_auth()
+        t._maybe_refresh()
+        for attempt in (0, 1):
+            try:
+                return raw_request("POST", self.url, json=payload, headers=self._headers(), timeout=self.timeout)
+            except ApiError as e:
+                # Same recovery as Transport.request: a rejected token gets one refresh and retry.
+                if e.status == 401 and attempt == 0 and t.refresher and t.creds.data.get("refresh_token") and t.refresher(t.cfg, t.creds):
+                    continue
+                if e.status == 401:
+                    e.hint = "Your session expired or the token was rejected. Run `ipx auth login`."
+                raise
+        raise IpxError("Request failed after refreshing the session.")  # pragma: no cover
 
     def _call(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
         self._next_id += 1
