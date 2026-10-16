@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install the latest ipx release binary.   curl -fsSL https://raw.githubusercontent.com/inferenceport-ai/cli/main/install.sh | sh
-# Options (environment): IPX_VERSION=1.0.3  IPX_INSTALL_DIR=$HOME/.local/bin
+# Options (environment): IPX_VERSION=1.0.4  IPX_INSTALL_DIR=$HOME/.local/bin
 set -eu
 
 REPO="inferenceport-ai/cli"
