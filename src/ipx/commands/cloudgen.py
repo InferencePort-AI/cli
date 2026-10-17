@@ -43,7 +43,7 @@ def build_group(tier: Tier) -> click.Group:
     pay = tier.billing
 
     @click.group(cmd, cls=IpxGroup, section=section,
-                 short_help=f"{tier.title}: chat, image, video, audio{', 3D' if tier is P2G else ''} ({'credits' if tier is P2G else 'subscription'})")
+                 short_help=f"{tier.title}: chat, image, video, audio{', 3D, embeddings, realtime' if tier is P2G else ''} ({'credits' if tier is P2G else 'subscription'})")
     @click.pass_context
     def group(ctx: click.Context) -> None:
         if tier is GEN and ctx.invoked_subcommand:
@@ -53,7 +53,8 @@ def build_group(tier: Tier) -> click.Group:
 
     group.help = (
         f"{tier.title} cloud generation, billed against {pay}.\n\n"
-        + ("Credit-metered API for production use: chat with any model, generate images, video, audio and 3D, manage "
+        + ("Credit-metered API for production use: chat with any model, generate images, video, audio and 3D, create "
+           "embeddings, run realtime voice sessions, manage "
            "keys and deployments. Needs a funded wallet (see `ipx p2g balance`). Set an organization context to bill "
            "your organization's wallet."
            if tier is P2G else
@@ -282,6 +283,11 @@ def build_group(tier: Tier) -> click.Group:
 
     # -- 3d ----------------------------------------------------------------------
     if tier is P2G:
+        from ipx.commands import modalities
+
+        modalities.add_embed(group)
+        modalities.add_realtime(group)
+
         @group.command("3d", examples=["ipx p2g 3d --image chair.jpg --model tripoSR -o chair.glb",
                                        "ipx p2g 3d --image logo.png --model trellis2 --resolution high"])
         @click.option("--image", required=True, help="Input image (path or URL).")
@@ -325,6 +331,18 @@ def build_group(tier: Tier) -> click.Group:
             raise IpxError("3D generation is not part of Lightning subscriptions.",
                            "Use `ipx p2g 3d --image <file>` (billed from your credit wallet).")
 
+        @group.command("embed", short_help="Embeddings (P2G only)")
+        def embed_info() -> None:
+            """Embeddings are only available through the Pay-2-Go API."""
+            raise IpxError("Embeddings are not part of Lightning subscriptions.",
+                           "Use `ipx p2g embed \"text\"` (billed per token from your credit wallet).")
+
+        @group.command("realtime", short_help="Realtime voice (P2G only)")
+        def realtime_info() -> None:
+            """Realtime voice and transcription are only available through the Pay-2-Go API."""
+            raise IpxError("Realtime sessions are not part of Lightning subscriptions.",
+                           "Use `ipx p2g realtime chat` or `ipx p2g realtime transcribe` (billed from your credit wallet).")
+
     # -- models ------------------------------------------------------------------
     @group.command("models", examples=[f"ipx {cmd} models", f"ipx {cmd} models --type image"])
     @click.option("-t", "--type", "kind", type=click.Choice(list(cloud.MODEL_KINDS)), help="Only this modality.")
@@ -333,6 +351,9 @@ def build_group(tier: Tier) -> click.Group:
     def models(app: App, kind: Optional[str], search: Optional[str]) -> None:
         """List the cloud models available to you."""
         app.require_login()
+        if kind in cloud.P2G_ONLY_KINDS and tier is not P2G:
+            raise IpxError(f"{kind.title()} models are only available through the Pay-2-Go API.",
+                           f"Use `ipx p2g models --type {kind}`.")
         items = cloud.list_models(app, tier, kind)
         if search:
             s = search.lower()

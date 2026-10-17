@@ -42,6 +42,9 @@ ipx gen audio speech "Welcome to InferencePort"
 
 ipx p2g chat                         # credit-metered Pay-2-Go API
 ipx p2g 3d --image chair.jpg -o chair.glb
+ipx p2g embed "The quick brown fox" -m text-embedding-3-small
+ipx p2g realtime chat "Tell me a joke" --audio-out joke.wav
+ipx p2g realtime transcribe meeting.wav
 ipx p2g balance
 
 ipx org members list                 # organizations
@@ -70,7 +73,7 @@ Every command has `--help`, and every command accepts the global `--json` flag f
 | --- | --- |
 | `ipx auth` | `login`, `logout`/`signout`, `status`/`whoami`, `context <org>`, `token` |
 | `ipx org` | members, invitations, teams, API keys, billing, usage, audit, domains, SSO, policy, desktop policy |
-| `ipx p2g` | credit-billed: `chat`, `text`, `image`, `video`, `audio …`, `3d`, `models`, `balance`, `ledger`, `keys`, `deploy` |
+| `ipx p2g` | credit-billed: `chat`, `text`, `image`, `video`, `audio …`, `3d`, `embed`, `realtime chat`/`transcribe`, `models`, `balance`, `ledger`, `keys`, `deploy` |
 | `ipx featherless` | `models`, `status`, `list`, `get`, `deploy`, `cancel`, `restore`, `terminate`, `usage` — personal deployments, or the organization's with an org context |
 | `ipx agent` | `list`, `registry`, `get`, `create`, `update`, `delete`, `chat`, `ask`, `profile`, `settings`, `invite …`, `members …` |
 | `ipx mcp council` | `tiers`, `models`, `reason`, `tools`, `test`, `connect <client>` — the hosted Council of LLMs MCP server |
@@ -99,3 +102,22 @@ the release binary), `.github/workflows` (CI and the multi-platform release pipe
 ## License
 
 Apache-2.0 — © 2026 InferencePort LLC. InferencePort AI™ is a Common-Law trademark of InferencePort LLC.
+
+## Embeddings and realtime
+
+```bash
+ipx p2g models --type embedding            # also: --type realtime
+ipx p2g embed "first text" "second text" --dimensions 256
+ipx p2g embed -f notes.txt --lines -o vectors.json    # one input per line, full response saved
+cat docs.txt | ipx p2g embed --lines --json            # machine-readable
+
+ipx p2g realtime chat "Say hello" --voice marin --audio-out hello.wav
+ipx p2g realtime chat --audio-in question.wav          # speak a WAV file, read the answer
+ipx p2g realtime transcribe talk.wav -m scribe-v2-realtime -o talk.txt
+arecord -f S16_LE -r 24000 -c 1 -t raw | ipx p2g realtime transcribe - --rate 24000
+```
+
+Embeddings are billed per input token; realtime sessions are billed as they run (per token for `gpt-realtime-*`, per second of streamed
+audio for the transcription models). Both are Pay-2-Go only and honour an organization context (`ipx auth context <org>` or `--org`).
+Audio is sent as 24 kHz mono PCM16 (WAV files are converted for you); `--session '{...}'` replaces the default `session.update` and
+`--events` prints the raw events when you need to see what a model sends.

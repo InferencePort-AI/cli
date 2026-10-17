@@ -29,7 +29,9 @@ class Tier:
 P2G = Tier("p2g", "/v1", "Pay-2-Go", "credits from your wallet", "default_p2g_model")
 GEN = Tier("gen", "/gen", "Lightning", "your subscription quotas", "default_gen_model")
 
-MODEL_KINDS = {"text": "text", "image": "images", "video": "videos", "audio": "audio", "3d": "3d"}
+MODEL_KINDS = {"text": "text", "image": "images", "video": "videos", "audio": "audio", "3d": "3d",
+               "embedding": "embeddings", "realtime": "realtime"}
+P2G_ONLY_KINDS = ("embedding", "realtime")
 MIME_EXT = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
     "video/mp4": ".mp4", "video/webm": ".webm",
