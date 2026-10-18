@@ -107,6 +107,7 @@ Apache-2.0 — © 2026 InferencePort LLC. InferencePort AI™ is a Common-Law tr
 
 ```bash
 ipx p2g models --type embedding            # also: --type realtime
+ipx p2g prices --type image --sort price      # compare per-image/second/token prices; --free, --json
 ipx p2g embed "first text" "second text" --dimensions 256
 ipx p2g embed -f notes.txt --lines -o vectors.json    # one input per line, full response saved
 cat docs.txt | ipx p2g embed --lines --json            # machine-readable
