@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json as _json
 import mimetypes
 import os
@@ -35,6 +36,31 @@ def ssl_context() -> ssl.SSLContext:
     return _SSL
 
 
+class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never forward credentials to a different host (urllib copies all headers by default)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            old_host = urllib.parse.urlparse(req.full_url)
+            new_host = urllib.parse.urlparse(newurl)
+            if (old_host.scheme, old_host.netloc.lower()) != (new_host.scheme, new_host.netloc.lower()):
+                for name in list(new.headers):
+                    if name.lower() in ("authorization", "x-client-id", "x-inferenceport-org", "cookie"):
+                        del new.headers[name]
+                for name in list(new.unredirected_hdrs):
+                    if name.lower() in ("authorization", "x-client-id", "x-inferenceport-org", "cookie"):
+                        del new.unredirected_hdrs[name]
+        return new
+
+
+def _opener(ctx: Optional[ssl.SSLContext]) -> urllib.request.OpenerDirector:
+    handlers: List[Any] = [_StripAuthOnCrossHostRedirect()]
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
+
+
 class Response:
     def __init__(self, status: int, headers: Dict[str, str], body: bytes):
         self.status = status
@@ -66,10 +92,20 @@ class StreamResponse:
         self.status = status
         self.headers = headers
 
+    def _read(self, size: int) -> bytes:
+        """Read a chunk, turning network failures mid-stream into a clean IpxError instead of a traceback."""
+        try:
+            if hasattr(self._raw, "read1"):
+                return self._raw.read1(size)
+            return self._raw.read(size)
+        except (OSError, http.client.HTTPException) as e:
+            raise IpxError(f"The connection was lost while receiving the response: {e}",
+                           "Check your connection and try again.")
+
     def iter_lines(self) -> Iterator[str]:
         buf = b""
         while True:
-            chunk = self._raw.read1(8192) if hasattr(self._raw, "read1") else self._raw.read(8192)
+            chunk = self._read(8192)
             if not chunk:
                 break
             buf += chunk
@@ -98,7 +134,11 @@ class StreamResponse:
 
     def iter_bytes(self, size: int = 65536) -> Iterator[bytes]:
         while True:
-            chunk = self._raw.read(size)
+            try:
+                chunk = self._raw.read(size)
+            except (OSError, http.client.HTTPException) as e:
+                raise IpxError(f"The connection was lost while receiving the response: {e}",
+                               "Check your connection and try again.")
             if not chunk:
                 break
             yield chunk
@@ -211,7 +251,7 @@ def raw_request(
     req = urllib.request.Request(url, data=body, headers=hdrs, method=method.upper())
     ctx = ssl_context() if url.lower().startswith("https") else None
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        resp = _opener(ctx).open(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         payload = e.read() if e.fp else b""
         raise api_error(e.code, payload, {k.lower(): v for k, v in e.headers.items()})
@@ -223,8 +263,11 @@ def raw_request(
     h = {k.lower(): v for k, v in resp.headers.items()}
     if stream:
         return StreamResponse(resp, resp.status, h)
-    with resp:
-        return Response(resp.status, h, resp.read())
+    try:
+        with resp:
+            return Response(resp.status, h, resp.read())
+    except (OSError, http.client.HTTPException) as e:
+        raise IpxError(f"Request to {urllib.parse.urlparse(url).netloc} failed while reading the response: {e}")
 
 
 class Transport:
