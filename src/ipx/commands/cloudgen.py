@@ -392,6 +392,40 @@ def _isnum(v: Any) -> bool:
 
 
 def _add_p2g_extras(group: click.Group) -> None:
+    @group.command("prices", short_help="Compare model prices across modalities",
+                   examples=["ipx p2g prices", "ipx p2g prices --type image --sort price", "ipx p2g prices --free",
+                             "ipx p2g prices -s gemini --json"])
+    @click.option("-t", "--type", "kind", type=click.Choice(list(cloud.MODEL_KINDS)), help="Only this modality.")
+    @click.option("-s", "--search", help="Filter by text in id or name.")
+    @click.option("--sort", "sort_by", type=click.Choice(["price", "name"]), default="price", show_default=True,
+                  help="Order within each modality.")
+    @click.option("--free", is_flag=True, help="Only free models.")
+    @click.option("--max-price", type=float, help="Only models whose (input) rate is at most this many USD per unit.")
+    @pass_app
+    def prices(app: App, kind: Optional[str], search: Optional[str], sort_by: str, free: bool,
+                max_price: Optional[float]) -> None:
+        """Compare prices across every Pay-2-Go model.
+
+        Rates are normalised per unit: per million tokens for text and embeddings, per image, per second of video or
+        audio, per model for 3D. The catalog is public, so no sign-in is needed.
+        """
+        from ipx import pricing as pricing_mod
+
+        data = app.api.get("/v1/models", auth=False) or {}
+        items = data.get("data") if isinstance(data, dict) else data
+        listed = pricing_mod.rows(items or [], kind=kind, search=search, free=free, max_price=max_price, sort=sort_by)
+
+        def render(_: Any) -> None:
+            if not listed:
+                ui.info("No models match those filters.")
+                return
+            table_rows = [(r["kind"], r["id"], r["name"], r["price"]) for r in listed]
+            ui.console.print(ui.make_table(["Type", "ID", "Name", "Price"], table_rows,
+                                           title=f"Pay-2-Go pricing ({len(listed)} models)"))
+            ui.dim("  Prices in USD. Check your wallet with `ipx p2g balance`.")
+
+        app.out(listed, render)
+
     @group.command("balance", examples=["ipx p2g balance"])
     @pass_app
     def balance(app: App) -> None:
