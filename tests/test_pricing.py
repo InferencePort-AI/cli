@@ -50,3 +50,15 @@ def test_command_table(ipx):
     r = ipx("p2g", "prices")
     assert r.exit_code == 0, r.output
     assert "lightning" in r.output and "per second" in r.output
+
+
+def test_token_priced_image_model_is_not_free():
+    from ipx.pricing import price_of
+
+    m = {"id": "gpt-image-2", "output_modalities": ["image"],
+         "pricing": {"prompt": "0", "completion": "0", "image": "0", "request": "0",
+                     "token_pricing": {"text_in": "3.75", "image_in": "6.0", "image_out": "22.5"}}}
+    p = price_of(m)
+    assert not p.free
+    assert (p.unit, p.input, p.output) == ("1M tokens", 3.75, 22.5)
+    assert p.label() == "$3.75 in / $22.50 out per 1M tokens"

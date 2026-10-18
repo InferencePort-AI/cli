@@ -78,6 +78,12 @@ def price_of(m: Dict[str, Any]) -> Price:
         o = completion * 1_000_000 if completion else None
         return Price(kind, "1M tokens", i, o)
     if kind == "image":
+        # Token-priced image models (gpt-image-*) report 0 flat prices and their real USD-per-1M-token rates in
+        # pricing.token_pricing; listing them as "free" would be wrong.
+        tp = p.get("token_pricing") if isinstance(p.get("token_pricing"), dict) else {}
+        t_in, t_out = _num(tp.get("text_in")), _num(tp.get("image_out"))
+        if t_in or t_out:
+            return Price(kind, "1M tokens", t_in, t_out)
         return Price(kind, "image", image if image is not None else request, None)
     if kind == "video":
         return Price(kind, "second", request, None)
