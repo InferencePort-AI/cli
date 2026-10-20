@@ -1,4 +1,5 @@
 """Typed System One decisions on the unified Pay-2-Go API."""
+
 import base64
 import json
 import sys
