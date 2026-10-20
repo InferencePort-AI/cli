@@ -101,6 +101,7 @@ def test_decision_rejects_unsupported_media_extension(ipx, tmp_path):
     questions.write_text(json.dumps(QUESTION))
     invalid = tmp_path / "archive.zip"
     invalid.write_bytes(b"not media")
-    result = ipx("p2g", "decision", "State", "-q", str(questions), "--image", str(invalid))
-    assert result.exit_code != 0
-    assert "Unsupported image extension" in result.output
+    from ipx.errors import IpxError
+
+    with pytest.raises(IpxError, match="Unsupported image extension"):
+        ipx("p2g", "decision", "State", "-q", str(questions), "--image", str(invalid))
