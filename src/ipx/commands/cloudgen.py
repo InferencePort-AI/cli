@@ -284,7 +284,6 @@ def build_group(tier: Tier) -> click.Group:
     # -- 3d ----------------------------------------------------------------------
     if tier is P2G:
         from ipx.commands import modalities
-
         from ipx.commands.decision import add_decision
         add_decision(group)
         modalities.add_embed(group)
