@@ -54,7 +54,7 @@ def build_group(tier: Tier) -> click.Group:
     group.help = (
         f"{tier.title} cloud generation, billed against {pay}.\n\n"
         + ("Credit-metered API for production use: chat with any model, generate images, video, audio and 3D, create "
-           "embeddings, run realtime voice sessions, manage "
+           "embeddings, evaluate typed decisions, run realtime voice sessions, manage "
            "keys and deployments. Needs a funded wallet (see `ipx p2g balance`). Set an organization context to bill "
            "your organization's wallet."
            if tier is P2G else
@@ -284,7 +284,8 @@ def build_group(tier: Tier) -> click.Group:
     # -- 3d ----------------------------------------------------------------------
     if tier is P2G:
         from ipx.commands import modalities
-
+        from ipx.commands.decision import add_decision
+        add_decision(group)
         modalities.add_embed(group)
         modalities.add_realtime(group)
 

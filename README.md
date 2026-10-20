@@ -122,3 +122,29 @@ Embeddings are billed per input token; realtime sessions are billed as they run 
 audio for the transcription models). Both are Pay-2-Go only and honour an organization context (`ipx auth context <org>` or `--org`).
 Audio is sent as 24 kHz mono PCM16 (WAV files are converted for you); `--session '{...}'` replaces the default `session.update` and
 `--events` prints the raw events when you need to see what a model sends.
+
+### Decision models (P2G)
+
+Use System One decision models with typed `choice`, `noul` and `score` questions:
+
+```sh
+ipx p2g models --type decision
+ipx p2g prices --type decision
+ipx p2g decision --file request.json --output result.json
+ipx p2g decision 'Please refund my duplicate payment' --questions questions.json --json
+cat request.json | ipx p2g decision --file - --json
+```
+
+`request.json` contains `model` (default `microsoft/decision-1`), `state` (text or
+JSON), and `questions` (a named object). `questions.json` contains only the named
+questions object, for example:
+
+```json
+{"refund":{"type":"noul","instructions":"Is the customer requesting a refund?"}}
+```
+
+The command calls `/v1/systemone` with your normal credentials and organization
+context. Provider keys stay on the server. Responses include answers, input tokens
+and credits charged. Use `--model` to override a request file's model. Additional
+System One providers and retail prices are configured by the backend operator in
+`src/models/decision.json`.
