@@ -61,7 +61,7 @@ def kind_of(m: Dict[str, Any]) -> str:
     if t:
         return t
     outs = [str(x).lower() for x in (m.get("output_modalities") or [])]
-    for k in ("image", "video", "audio", "3d", "embedding"):
+    for k in ("image", "video", "audio", "3d", "embedding", "decision"):
         if k in outs:
             return k
     return "text"
@@ -73,7 +73,7 @@ def price_of(m: Dict[str, Any]) -> Price:
     prompt, completion = _num(p.get("prompt")), _num(p.get("completion"))
     request, image = _num(p.get("request")), _num(p.get("image"))
 
-    if kind in ("text", "embedding") or (kind == "realtime" and (prompt or completion)):
+    if kind in ("text", "embedding", "decision") or (kind == "realtime" and (prompt or completion)):
         i = prompt * 1_000_000 if prompt is not None else None
         o = completion * 1_000_000 if completion else None
         return Price(kind, "1M tokens", i, o)
