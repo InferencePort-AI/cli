@@ -59,3 +59,48 @@ def test_discovery_and_prices_commands(ipx):
     r = ipx("--json", "p2g", "prices", "--type", "decision")
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)[0]["kind"] == "decision"
+
+
+def test_decision_image_and_video_files(ipx, tmp_path):
+    import base64
+
+    sign_in(ipx)
+    questions = tmp_path / "questions.json"
+    questions.write_text(json.dumps(QUESTION))
+    photo = tmp_path / "rover.jpg"
+    photo.write_bytes(b"fake-jpeg")
+    clip = tmp_path / "launch.mp4"
+    clip.write_bytes(b"fake-mp4")
+    ipx.fake.route("POST", "/v1/systemone", body=REPLY)
+    r = ipx("--json", "p2g", "decision", "Mars scene", "-q", str(questions),
+            "-m", "vllm-sr-d3-flash", "--image", str(photo), "--video", str(clip))
+    assert r.exit_code == 0, r.output
+    sent = ipx.fake.last("/v1/systemone")["json"]
+    assert sent["model"] == "vllm-sr-d3-flash"
+    assert sent["images"] == ["data:image/jpeg;base64," + base64.b64encode(b"fake-jpeg").decode()]
+    assert sent["videos"] == ["data:video/mp4;base64," + base64.b64encode(b"fake-mp4").decode()]
+
+
+def test_decision_named_assets_with_full_request(ipx, tmp_path):
+    sign_in(ipx)
+    request_file = tmp_path / "request.json"
+    request_file.write_text(json.dumps({"model": "vllm-sr-d3-turbo", "state": "Animal: <a>", "questions": QUESTION}))
+    assets = tmp_path / "assets.json"
+    assets.write_text(json.dumps({"<a>": {"type": "image", "data_base64": "YWJj"}}))
+    ipx.fake.route("POST", "/v1/systemone", body=REPLY)
+    r = ipx("--json", "p2g", "decision", "--file", str(request_file), "--assets", str(assets))
+    assert r.exit_code == 0, r.output
+    sent = ipx.fake.last("/v1/systemone")["json"]
+    assert sent["model"] == "vllm-sr-d3-turbo"
+    assert sent["assets"] == {"<a>": {"type": "image", "data_base64": "YWJj"}}
+
+
+def test_decision_rejects_unsupported_media_extension(ipx, tmp_path):
+    sign_in(ipx)
+    questions = tmp_path / "questions.json"
+    questions.write_text(json.dumps(QUESTION))
+    invalid = tmp_path / "archive.zip"
+    invalid.write_bytes(b"not media")
+    result = ipx("p2g", "decision", "State", "-q", str(questions), "--image", str(invalid))
+    assert result.exit_code != 0
+    assert "Unsupported image extension" in result.output
