@@ -12,7 +12,6 @@ from ipx.app import App, pass_app
 from ipx.commands.modalities import write_atomic
 from ipx.errors import IpxError
 
-
 _MEDIA_MIMES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm",
