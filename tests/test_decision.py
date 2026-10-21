@@ -105,3 +105,30 @@ def test_decision_rejects_unsupported_media_extension(ipx, tmp_path):
 
     with pytest.raises(IpxError, match="Unsupported image extension"):
         ipx("p2g", "decision", "State", "-q", str(questions), "--image", str(invalid))
+
+
+def test_decision_rejects_oversized_media(ipx, tmp_path):
+    sign_in(ipx)
+    questions = tmp_path / "questions.json"
+    questions.write_text(json.dumps(QUESTION))
+    image = tmp_path / "huge.png"
+    with image.open("wb") as handle:
+        handle.truncate(8_000_001)
+    from ipx.errors import IpxError
+    with pytest.raises(IpxError, match="at most 8000000 bytes"):
+        ipx("p2g", "decision", "State", "-q", str(questions),
+            "-m", "vllm-sr-d3-flash", "--image", str(image))
+
+
+def test_decision_rejects_too_many_images(ipx, tmp_path):
+    sign_in(ipx)
+    questions = tmp_path / "questions.json"
+    questions.write_text(json.dumps(QUESTION))
+    image = tmp_path / "photo.png"
+    image.write_bytes(b"png")
+    from ipx.errors import IpxError
+    args = ["p2g", "decision", "State", "-q", str(questions), "-m", "vllm-sr-d3-flash"]
+    for _ in range(5):
+        args += ["--image", str(image)]
+    with pytest.raises(IpxError, match="at most 4 images"):
+        ipx(*args)
