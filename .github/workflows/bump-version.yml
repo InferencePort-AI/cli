@@ -1,0 +1,48 @@
+name: Bump CLI Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New stable version (e.g. 1.1.0, without v prefix)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-cli-version-main
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bump all first-party versions
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          python packaging/bump_version.py "$NEW_VERSION"
+          python packaging/check_versions.py "$NEW_VERSION"
+          python -m pip install pytest
+          python -m pytest tests/test_bump_version.py
+      - name: Commit and push to main
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          git add -- install.sh install.ps1 packaging/cargo/Cargo.toml packaging/cargo/Cargo.lock packaging/npm/ipx/package.json src/ipx/__init__.py
+          if git diff --cached --quiet; then
+            echo "Already on version $NEW_VERSION"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore: bump CLI version to $NEW_VERSION"
+          git push origin HEAD:main
