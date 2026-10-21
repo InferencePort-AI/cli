@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: bump-cli-version-main
@@ -23,6 +24,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          # An optional PAT/App token lets PR CI run without an approval prompt.
+          token: ${{ secrets.VERSION_BUMP_TOKEN || github.token }}
           persist-credentials: true
       - uses: actions/setup-python@v5
         with:
@@ -35,14 +38,27 @@ jobs:
           python packaging/check_versions.py "$NEW_VERSION"
           python -m pip install -e ".[dev]"
           python -m pytest tests/test_bump_version.py
-      - name: Commit and push to main
+      - name: Create version bump pull request
         env:
           NEW_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.VERSION_BUMP_TOKEN || github.token }}
         run: |
           git add -- install.sh install.ps1 packaging/cargo/Cargo.toml packaging/cargo/Cargo.lock packaging/npm/ipx/package.json src/ipx/__init__.py
           if git diff --cached --quiet; then
-            echo "Already on version $NEW_VERSION"
+            echo "Already on version $NEW_VERSION; no pull request needed." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
+          branch="chore/bump-cli-version-${NEW_VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$branch"
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore: bump CLI version to $NEW_VERSION"
-          git push origin HEAD:main
+          git push --set-upstream origin "$branch"
+
+          pr_url=$(gh pr create --base main --head "$branch" \
+            --title "chore: bump CLI version to $NEW_VERSION" \
+            --body "Automated CLI version bump to **$NEW_VERSION**.
+
+          Updates Python, Cargo, npm platform packages, and installer version examples. Version consistency and bump regression tests passed.
+
+          Merge this PR after the required CI and code scanning checks succeed. The workflow does not push directly to protected main.")
+          echo "Created PR: $pr_url" | tee -a "$GITHUB_STEP_SUMMARY"
