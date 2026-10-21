@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "ipx-cli"
-version = "1.5.0"
+version = "1.0.4"
 dependencies = [
  "sha2",
  "ureq",
