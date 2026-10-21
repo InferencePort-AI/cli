@@ -33,6 +33,8 @@ jobs:
         run: |
           python packaging/bump_version.py "$NEW_VERSION"
           python packaging/check_versions.py "$NEW_VERSION"
+          python -m pip install pytest
+          python -m pytest tests/test_bump_version.py
       - name: Commit and push to main
         env:
           NEW_VERSION: ${{ inputs.version }}
