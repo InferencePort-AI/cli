@@ -19,11 +19,19 @@ _MEDIA_MIMES = {
 }
 
 
-def _media_data_url(path: str, kind: str) -> str:
+def _media_data_url(path: str, kind: str, limit: int) -> str:
     mime = _MEDIA_MIMES.get(Path(path).suffix.lower())
     if not mime or not mime.startswith(kind + "/"):
         raise IpxError(f"Unsupported {kind} extension: {path}")
-    return f"data:{mime};base64,{base64.b64encode(Path(path).read_bytes()).decode('ascii')}"
+    source = Path(path)
+    size = source.stat().st_size
+    if not 0 < size <= limit:
+        raise IpxError(f"{kind} file must be nonempty and at most {limit} bytes: {path}")
+    with source.open("rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) != size:
+        raise IpxError(f"{kind} file changed or exceeds its size limit: {path}")
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 def add_decision(group):
@@ -72,23 +80,48 @@ def add_decision(group):
                 if state is None or state == "-":
                     state = sys.stdin.read() if not sys.stdin.isatty() else ""
                 body = {"model": model, "state": state, "questions": named}
-            # --file preserves any existing images/videos/assets; flags add to them.
+            # --file preserves existing media, subject to the same API limits.
+            turbo = body.get("model") in ("vllm-sr-d3-turbo", "vllm-sr/d3-turbo", "vllm-sr/d3", "d3-turbo")
+            image_limit = 16 * 1024 * 1024 if turbo else 8_000_000
+            image_count_limit = 16 if turbo else 4
+            current_images = body.get("images", [])
+            current_videos = body.get("videos", [])
+            current_assets = body.get("assets", {})
+            if not isinstance(current_images, list) or not isinstance(current_videos, list) or not isinstance(current_assets, dict):
+                raise IpxError("images/videos must be arrays and assets must be an object.")
+            added_assets = {}
+            if assets_file:
+                with open(assets_file, encoding="utf-8") as stream:
+                    added_assets = json.load(stream)
+                if not isinstance(added_assets, dict):
+                    raise IpxError("Assets JSON must be an object.")
+            if len(current_images) + len(image_paths) + len({**current_assets, **added_assets}) > image_count_limit:
+                raise IpxError(f"This model supports at most {image_count_limit} images including named assets.")
+            if len(current_videos) + len(video_paths) > 1:
+                raise IpxError("This model supports at most one video.")
+            for path in image_paths:
+                if not 0 < Path(path).stat().st_size <= image_limit:
+                    raise IpxError(f"image file must be nonempty and at most {image_limit} bytes: {path}")
+            for path in video_paths:
+                if not 0 < Path(path).stat().st_size <= 32_000_000:
+                    raise IpxError(f"video file must be nonempty and at most 32000000 bytes: {path}")
+            total = len(json.dumps(body).encode("utf-8")) + len(json.dumps(added_assets).encode("utf-8"))
+            total += sum(4 * ((Path(p).stat().st_size + 2) // 3) + 64 for p in (*image_paths, *video_paths))
+            if total > 48 * 1024 * 1024:
+                raise IpxError("Decision request exceeds the 48 MiB combined JSON limit.")
             if image_paths or video_paths:
                 for field, files, kind in (("images", image_paths, "image"), ("videos", video_paths, "video")):
                     if files:
                         existing = body.setdefault(field, [])
                         if not isinstance(existing, list):
                             raise IpxError(f"{field} in the request must be an array.")
-                        existing.extend(_media_data_url(path, kind) for path in files)
+                        existing.extend(_media_data_url(path, kind, image_limit if kind == "image" else 32_000_000) for path in files)
             if assets_file:
-                with open(assets_file, encoding="utf-8") as stream:
-                    named_assets = json.load(stream)
-                if not isinstance(named_assets, dict):
-                    raise IpxError("Assets JSON must be an object.")
-                existing_assets = body.setdefault("assets", {})
-                if not isinstance(existing_assets, dict):
-                    raise IpxError("assets in the request must be an object.")
-                existing_assets.update(named_assets)
+                body.setdefault("assets", {}).update(added_assets)
+            if len(json.dumps({"state": body.get("state"), "questions": body.get("questions")}).encode("utf-8")) > 1_000_000:
+                raise IpxError("Decision state and questions exceed 1 MB.")
+            if len(json.dumps(body).encode("utf-8")) > 48 * 1024 * 1024:
+                raise IpxError("Decision request exceeds the 48 MiB combined JSON limit.")
             if not isinstance(body.get("state"), (str, dict, list)) or not body["state"]:
                 raise IpxError("Provide a non-empty state.")
         except (OSError, ValueError) as e:
