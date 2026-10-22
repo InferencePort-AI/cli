@@ -11,10 +11,12 @@ import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from ada_url import URL
 
 from ipx.config import Config, Credentials, config_dir
 from ipx.server_crypto import Sessions, decrypt_body
+from ipx.server_http import BodyTooLarge, HTTPServer
 
 MAX_BODY = 20 * 1024 * 1024
 MAX_LOG = 10 * 1024 * 1024
@@ -134,13 +136,10 @@ class Verifier:
             conn.close()
 
 
-class BodyTooLarge(Exception):
-    pass
-
-
 class ProxyServer:
-    def __init__(self, *, host, port, ollama_url, users, api_keys, verifier, echo=False):
+    def __init__(self, *, host, port, ollama_url, users, api_keys, verifier, echo=False, http_settings=None):
         self.host, self.port = host, port
+        self.http_settings, self.max_body = http_settings, MAX_BODY
         self.ollama_url = ollama_url
         self.ollama = urllib.parse.urlsplit(ollama_url)
         self.users, self.api_keys, self.verifier = list(users), set(api_keys), verifier
@@ -149,56 +148,7 @@ class ProxyServer:
         self.connections, self.connections_lock = set(), threading.Lock()
 
     def serve(self, on_ready=None):
-        owner = self
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def handle_one_request(self):
-                try:
-                    super().handle_one_request()
-                except (BrokenPipeError, ConnectionResetError):
-                    self.close_connection = True
-
-            def setup(self):
-                super().setup()
-                with owner.connections_lock:
-                    owner.connections.add(self.connection)
-
-            def finish(self):
-                try:
-                    super().finish()
-                finally:
-                    with owner.connections_lock:
-                        owner.connections.discard(self.connection)
-
-            def parse_request(self):
-                valid = super().parse_request()
-                if valid:
-                    # BaseHTTPRequestHandler silently collapses // to /; retain
-                    # the raw target so the SSRF guard can reject it.
-                    self.path = self.requestline.split()[1]
-                    self.connection.settimeout(None)
-                return valid
-
-            def log_message(self, *args):
-                pass
-
-            def __getattr__(self, name):
-                if name.startswith("do_"):
-                    def dispatch():
-                        owner._handle(self)
-                        self.connection.settimeout(5)
-                    return dispatch
-                raise AttributeError(name)
-
-        server_class = ThreadingHTTPServer
-        if ":" in self.host:
-            class IPv6Server(ThreadingHTTPServer):
-                address_family = socket.AF_INET6
-            server_class = IPv6Server
-        httpd = server_class((self.host, self.port), Handler)
-        httpd.daemon_threads = True
+        httpd = HTTPServer((self.host, self.port), self, self.http_settings)
         self.httpd = httpd
         self.log.line("INFO", f"Proxy server running on http://localhost:{httpd.server_address[1]}")
         if on_ready:
@@ -222,22 +172,27 @@ class ProxyServer:
     @staticmethod
     def _send(h, status, body=None, extra=None):
         data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode() if body is not None else b""
+        chunked = h.request_version == "HTTP/1.1" and status != 204 and h.command != "HEAD"
+        if h.request_version != "HTTP/1.1": h.close_connection = True
         h.send_response_only(status)
         h.send_header("Date", h.date_time_string())
         h.send_header("Connection", "close" if h.close_connection else "keep-alive")
         if not h.close_connection:
-            h.send_header("Keep-Alive", "timeout=5")
+            h.send_header("Keep-Alive", f"timeout={int(h.settings.keep_alive_timeout)}")
         if body is not None:
             h.send_header("Content-Type", "application/json")
-        if status != 204 and h.command != "HEAD":
+        if chunked:
             h.send_header("Transfer-Encoding", "chunked")
         for k, v in (extra or {}).items():
             h.send_header(k, v)
         h.end_headers()
         if h.command != "HEAD" and status != 204:
-            if data:
-                h.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
-            h.wfile.write(b"0\r\n\r\n")
+            if chunked:
+                if data:
+                    h.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+                h.wfile.write(b"0\r\n\r\n")
+            else:
+                h.wfile.write(data)
 
     def _cors(self, h):
         origin = h.headers.get("Origin")
@@ -274,34 +229,7 @@ class ProxyServer:
         return (200, None, matched) if matched else (403, {"error": "Access denied"}, None)
 
     def _read(self, h):
-        chunks, total = [], 0
-        chunked = h.headers.get("Transfer-Encoding", "").lower() == "chunked"
-        remaining = int(h.headers.get("Content-Length") or 0)
-        while chunked or remaining:
-            if chunked:
-                size = int(h.rfile.readline().split(b";", 1)[0], 16)
-                if not size:
-                    while h.rfile.readline() not in (b"\r\n", b"\n", b""):
-                        pass
-                    break
-            else:
-                size = min(65536, remaining)
-            if total + size > MAX_BODY:
-                self.log.line("WARN", "Request body too large")
-                h.close_connection = True
-                h.connection.shutdown(socket.SHUT_RDWR)
-                raise BodyTooLarge()
-            part = h.rfile.read(size)
-            if len(part) != size:
-                raise ConnectionResetError("Incomplete request body")
-            chunks.append(part)
-            total += size
-            if chunked:
-                if h.rfile.read(2) != b"\r\n":
-                    raise ValueError("Invalid chunk")
-            else:
-                remaining -= size
-        return b"".join(chunks)
+        return h.read_body()
 
     def _handle(self, h):
         try:
@@ -390,7 +318,8 @@ class ProxyServer:
         self._forward(h, cors, decrypt_body(session.key, raw) if session else raw)
 
     def _forward(self, h, cors, body):
-        target = urllib.parse.urlsplit(urllib.parse.urljoin(self.ollama_url, h.path))
+        target_url = URL(h.path, self.ollama_url)
+        target = urllib.parse.urlsplit(target_url.href)
         path = urllib.parse.urlunsplit(("", "", target.path or "/", target.query, ""))
         self.log.line("INFO", f"[Proxy] Forwarding -> {h.command} {target.scheme}://{target.netloc}{target.path}")
         headers = {k.lower(): v for k, v in h.headers.items() if k.lower() not in HOP}
@@ -423,7 +352,7 @@ class ProxyServer:
             if "connection" not in response_headers:
                 response_headers["connection"] = "close" if h.close_connection else "keep-alive"
                 if not h.close_connection:
-                    response_headers["keep-alive"] = "timeout=5"
+                    response_headers["keep-alive"] = f"timeout={int(h.settings.keep_alive_timeout)}"
             if not resp.getheader("date"):
                 response_headers["date"] = h.date_time_string()
             for k, v in response_headers.items():

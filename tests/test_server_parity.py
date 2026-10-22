@@ -65,12 +65,19 @@ def request(port, method, path, token=None, body=None, headers=None):
 @pytest.fixture
 def python_host(home, ollama):
     servers = []
-    def start(users=USERS, port=0):
-        server = ProxyServer(host="127.0.0.1", port=port, ollama_url=ollama.url, users=users, api_keys=["key"], verifier=Verifier())
+    def start(users=USERS, port=0, http_settings=None):
+        server = ProxyServer(host="127.0.0.1", port=port, ollama_url=ollama.url, users=users, api_keys=["key"], verifier=Verifier(), http_settings=http_settings)
         ready = threading.Event()
-        thread = threading.Thread(target=server.serve, args=(ready.set,), daemon=True)
+        errors = []
+        def serve():
+            try: server.serve(ready.set)
+            except Exception as err:
+                errors.append(err)
+                ready.set()
+        thread = threading.Thread(target=serve, daemon=True)
         thread.start()
         assert ready.wait(5)
+        if errors: raise errors[0]
         servers.append((server, thread))
         return server
     yield start
@@ -80,11 +87,11 @@ def python_host(home, ollama):
 
 
 @pytest.fixture
-def reference_env(home, fake, ollama, tmp_path):
+def reference_env(home, fake, ollama, tmp_path, request):
     if not (ROOT / "node_modules/typescript").exists() and not os.environ.get("IPX_TYPESCRIPT_PATH"):
         pytest.skip("Set IPX_DESKTOP_SOURCE and install desktop dev dependencies for differential tests")
     fake.route("POST", "/verify", lambda rec: (*verification(rec["json"]["token"])[:1], {}, verification(rec["json"]["token"])[1]))
-    return dict(os.environ, PARITY_VERIFY_URL=fake.url + "/verify", PARITY_OLLAMA_URL=ollama.url,
+    return dict(os.environ, **getattr(request, "param", {}), PARITY_VERIFY_URL=fake.url + "/verify", PARITY_OLLAMA_URL=ollama.url,
                 PARITY_LOG_DIR=str(tmp_path), PARITY_CLOCK_FILE=str(tmp_path / "clock"), PARITY_USERS=json.dumps(USERS), PARITY_HARDWARE=json.dumps(SNAPSHOT))
 
 
@@ -215,7 +222,7 @@ def test_rate_and_session_exact_boundaries(monkeypatch):
 
 
 def run_reference(mode, env):
-    output = subprocess.check_output(["node", str(LOADER), str(ROOT), mode], env=env, text=True, timeout=20)
+    output = subprocess.check_output(["node", str(LOADER), str(ROOT), mode], env=env, text=True, encoding="utf-8", timeout=40)
     return json.loads(next(line[7:] for line in output.splitlines() if line.startswith("RESULT ")))
 
 
@@ -244,10 +251,8 @@ def test_hardware_algorithms(reference_env, backend, controllers):
 
 def test_real_desktop_secure_client(reference_env, python_host, ollama):
     ollama.route("POST", "/api/chat", body={"message": {"content": "interoperable"}, "done": True})
-    try:
-        server = python_host(port=52458)
-    except OSError:
-        pytest.skip("desktop secure client requires port 52458")
+    server = python_host()
+    reference_env = dict(reference_env, PARITY_CLIENT_URL=f"http://127.0.0.1:{server.httpd.server_port}")
     result = run_reference("client", reference_env)
     assert result["status"] == 200 and "interoperable" in result["body"]
     assert len(server.sessions.records) == 1
@@ -389,3 +394,112 @@ def test_differential_expiration_and_reset_boundary(reference, reference_env, py
     for port in ports:
         status, _, raw = request(port, "GET", "/api/tags", "admin", headers={"X-Inferenceport-Session": sessions[port]})
         assert status == 401 and json.loads(raw) == {"error": "Invalid or expired session"}
+
+
+def raw_exchange(port, data):
+    import socket
+    conn = socket.create_connection(("127.0.0.1", port), timeout=3)
+    conn.sendall(data)
+    parts = []
+    try:
+        while True:
+            part = conn.recv(65536)
+            if not part: break
+            parts.append(part)
+    finally:
+        conn.close()
+    wire = re.sub(rb"(?im)^date: [^\r\n]*\r\n", b"", b"".join(parts))
+    if not wire: return wire
+    head, _, body = wire.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    # Field ordering/casing is semantically unordered; duplicate values,
+    # framing headers and the actual framed body remain in the comparison.
+    return lines[0], sorted((k.lower(), v.strip()) for line in lines[1:] for k, _, v in [line.partition(b":")]), body
+
+
+RAW_CASES = [
+    b"BOGUS / HTTP/1.1\r\nHost: x\r\n\r\n",
+    b"GET / HTTP/2.0\r\nHost: x\r\nConnection: close\r\n\r\n",
+    b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: x\r\nBad Header: no\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: x\r\nBad: a\x00b\r\n\r\n",
+    b"GET / HTTP/1.1\nHost: x\nConnection: close\n\n",
+    b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+    b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+    b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: +1\r\n\r\n",
+    b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n",
+    b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",
+    b"POST /api/chat HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer key\r\nTransfer-Encoding: chunked\r\n\r\nZ\r\n",
+    b"CONNECT localhost:11434 HTTP/1.1\r\nHost: x\r\n\r\n",
+    b"GET /__health HTTP/1.0\r\n\r\n",
+    b"GET /api/tags HTTP/1.0\r\n\r\n",
+    b"GET /__health HTTP/1.0\r\nConnection: keep-alive, close\r\n\r\n",
+    b"GET /__health HTTP/1.1\r\nHost: x\r\nConnection: upgrade, close\r\nUpgrade: websocket\r\n\r\n",
+    b"GET /api/tags HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: Bearer key\r\nAuthorization: Bearer bad\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: x\r\nX-Large: " + b"a" * 17000 + b"\r\n\r\n",
+]
+
+
+@pytest.mark.parametrize("wire", RAW_CASES)
+def test_raw_llhttp_boundary(reference, python_host, ollama, wire):
+    ollama.route("GET", "/api/tags", body={"models": []})
+    server = python_host()
+    assert raw_exchange(server.httpd.server_port, wire) == raw_exchange(reference, wire)
+
+
+@pytest.mark.parametrize("path", ["/api/a/%2e%2e/tags?x=%2f", "/api/a/../tags", "/api/%2E/tags", "/api/a/%2e./tags"])
+def test_whatwg_paths(reference, python_host, ollama, path):
+    ollama.route("POST", "/api/tags", lambda rec: (200, {}, {"path": rec["path"], "query": rec["query"]}))
+    server = python_host()
+    assert request(server.httpd.server_port, "POST", path, "admin", {}) == request(reference, "POST", path, "admin", {})
+
+
+def test_live_native_collectors_against_systeminformation(reference_env):
+    from ipx.hardware_native import cpu_snapshot, inspect_hardware
+    cpu_snapshot.cache_clear()
+    expected = run_reference("native", reference_env)
+    actual = inspect_hardware()
+    assert actual["cpu"] == expected["cpu"]
+    assert actual["flags"] == expected["flags"]
+    assert actual["mem"]["total"] == expected["mem"]["total"]
+    # Both are real sequential OS samples; available memory can move while the
+    # profiler/driver query runs. Only that time-varying measurement has tolerance.
+    assert abs(actual["mem"]["available"] - expected["mem"]["available"]) <= max(512 * 1024**2, expected["mem"]["total"] * .05)
+    if os.sys.platform in ("win32", "darwin"):
+        assert {row["model"] for row in expected["controllers"]} <= {row["model"] for row in actual["controllers"]}
+    for row in actual["controllers"]:
+        assert row.get("vram") is None or row["vram"] >= 0
+        assert row.get("memoryFree") is None or 0 <= row["memoryFree"] <= row["vram"]
+    assert actual["gpuDetectionFailed"] is False
+    assert actual["backend"] in ("cpu", "cuda", "rocm", "metal", "unknown")
+
+
+@pytest.mark.parametrize("reference_env", [{"PARITY_HTTP_SETTINGS": json.dumps({"headersTimeout": 100, "requestTimeout": 250, "connectionsCheckingInterval": 10})}], indirect=True)
+@pytest.mark.parametrize("wire", [b"GET /__health HTTP/1.1\r\nHost:", b"POST /sysinfo HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer key\r\nContent-Length: 100\r\n\r\n{"])
+def test_node_request_and_header_deadlines(reference, reference_env, python_host, wire):
+    from ipx.server_http import HTTPSettings
+    settings = HTTPSettings(headers_timeout=.1, request_timeout=.25, connections_checking_interval=.01)
+    server = python_host(http_settings=settings)
+    expected = raw_exchange(reference, wire)
+    assert expected[0] == b"HTTP/1.1 408 Request Timeout"
+    assert raw_exchange(server.httpd.server_port, wire) == expected
+
+
+@pytest.mark.parametrize("reference_env", [{"PARITY_HTTP_SETTINGS": json.dumps({"headersTimeout": 100, "requestTimeout": 250, "connectionsCheckingInterval": 10})}], indirect=True)
+def test_completed_request_long_inference_has_no_deadline(reference, reference_env, python_host, ollama):
+    import time
+
+    from ipx.server_http import HTTPSettings
+    def infer(rec):
+        time.sleep(.4)
+        return 200, {}, {"done": True}
+    ollama.route("POST", "/api/chat", infer)
+    server = python_host(http_settings=HTTPSettings(headers_timeout=.1, request_timeout=.25, connections_checking_interval=.01))
+    assert request(server.httpd.server_port, "POST", "/api/chat", "key", {}) == request(reference, "POST", "/api/chat", "key", {})
+
+
+@pytest.mark.parametrize("size", [16350, 16360, 16370, 16380, 16384])
+def test_header_overflow_boundary(reference, python_host, size):
+    wire = b"GET /__health HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX: " + b"x" * size + b"\r\n\r\n"
+    server = python_host()
+    assert raw_exchange(server.httpd.server_port, wire) == raw_exchange(reference, wire)

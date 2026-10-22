@@ -19,7 +19,7 @@ from rich.text import Text
 from ipx import policy, ui
 from ipx.app import App, pass_app
 from ipx.clickx import IpxGroup
-from ipx.config import DEFAULT_SERVER_PORT, config_dir
+from ipx.config import DEFAULT_SERVER_PORT, _write_json, config_dir
 from ipx.errors import IpxError
 from ipx.local import ollama_version
 from ipx.proxy import ProxyServer, Verifier, log_path
@@ -244,7 +244,7 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
     stopped = threading.Event()
 
     def advertise() -> None:  # only once the port is bound, so a pid file always means "listening"
-        pid_path().write_text(json.dumps({"pid": os.getpid(), "port": port, "host": host, "started": time.time(), "org": app.org}), encoding="utf-8")
+        _write_json(pid_path(), {"pid": os.getpid(), "port": port, "host": host, "started": time.time(), "org": app.org})
         threading.Thread(target=monitor_host_policy, args=(app, srv, users, keys, stopped), daemon=True).start()
 
     try:

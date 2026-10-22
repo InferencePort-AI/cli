@@ -50,6 +50,7 @@ function load(file) {
     }
     if (id === 'http') {
       const proxy = Object.create(http);
+      proxy.createServer = (listener) => http.createServer(JSON.parse(process.env.PARITY_HTTP_SETTINGS || '{}'), listener);
       proxy.request = (url, options, cb) => {
         const u = new URL(url);
         if (u.origin === 'http://localhost:11434') {
@@ -68,13 +69,27 @@ function load(file) {
 }
 (async () => {
   const helper = path.join(root, 'node-apis/helper');
-  if (mode === 'rating') {
+  if (mode === 'native') {
+    const native = process.env.IPX_SYSTEMINFORMATION_PATH ? require(process.env.IPX_SYSTEMINFORMATION_PATH) : desktopRequire('systeminformation');
+    const [cpu, flags, mem, graphics] = await Promise.all([native.cpu(), native.cpuFlags(), native.mem(), native.graphics()]);
+    console.log('RESULT ' + JSON.stringify({cpu:{brand:cpu.brand,cores:cpu.cores,cache:{l3:cpu.cache.l3 || 0}}, flags,
+      mem:{total:mem.total,available:mem.available},controllers:graphics.controllers}));
+  } else if (mode === 'rating') {
     const sys = load(path.join(helper, 'sysinfo.ts'));
     await sys.initHardwareInfo();
     const ratings = [];
     for (const size of JSON.parse(process.env.PARITY_SIZES)) ratings.push(await sys.getHardwareRating(size));
     console.log('RESULT ' + JSON.stringify(ratings));
-  } else if (mode === 'client') {
+   } else if (mode === 'client') {
+    // Preserve the real client's logical 52458 URL and negotiate its exact
+    // protocol; only the test network adapter maps to an ephemeral listener.
+    const nativeFetch = global.fetch;
+    global.fetch = (input, init) => {
+      const logical = new URL(typeof input === 'string' ? input : input.url || input.toString());
+      const destination = new URL(process.env.PARITY_CLIENT_URL);
+      logical.host = destination.host;
+      return nativeFetch(logical, init);
+    };
     const fetch = load(path.join(helper, 'proxy52458Client.ts')).createSecure52458Fetch(async () => 'admin');
     const response = await fetch('http://127.0.0.1:52458/api/chat', {method:'POST',body:JSON.stringify({model:'test',messages:[]})});
     console.log('RESULT ' + JSON.stringify({status:response.status,body:await response.text()}));

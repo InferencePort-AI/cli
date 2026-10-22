@@ -5,76 +5,13 @@ validated against identical desktop systeminformation snapshots.
 """
 from __future__ import annotations
 
-import json
 import math
 import re
-import shutil
-import subprocess
-import sys
 from decimal import ROUND_HALF_UP, Decimal
-from functools import lru_cache
-from pathlib import Path
 
-import psutil
+from ipx.hardware_native import inspect_hardware
 
 GPU_TFLOPS_DB = {'rtx 5090': 105.0, 'rtx 5080': 56.0, 'rtx 5070 ti': 44.0, 'rtx 5070': 36.0, 'rtx 4090': 82.6, 'rtx 4080 super': 55.3, 'rtx 4080': 52.1, 'rtx 4070 ti super': 44.1, 'rtx 4070 ti': 40.1, 'rtx 4070 super': 35.5, 'rtx 4070': 29.1, 'rtx 4060 ti': 22.1, 'rtx 4060': 15.1, 'rtx 3090 ti': 40.0, 'rtx 3090': 35.6, 'rtx 3080 ti': 34.1, 'rtx 3080': 29.8, 'rtx 3070 ti': 21.8, 'rtx 3070': 20.3, 'rtx 3060 ti': 16.2, 'rtx 3060': 12.7, 'rtx 2080 ti': 13.4, 'rtx 2080 super': 11.2, 'rtx 2080': 10.1, 'rtx 2070 super': 9.1, 'rtx 2070': 7.5, 'rtx 2060 super': 7.2, 'rtx 2060': 6.5, 'gtx 1660 ti': 5.5, 'gtx 1660 super': 5.2, 'gtx 1660': 5.0, 'gtx 1080 ti': 11.3, 'gtx 1080': 8.9, 'gtx 1070 ti': 8.1, 'gtx 1070': 6.5, 'gtx 1060': 4.4, 'rx 7900 xtx': 61.4, 'rx 7900 xt': 51.5, 'rx 7900 gre': 38.5, 'rx 7800 xt': 37.2, 'rx 7700 xt': 34.6, 'rx 7600': 22.1, 'rx 6950 xt': 23.4, 'rx 6900 xt': 23.0, 'rx 6800 xt': 20.7, 'rx 6800': 16.8, 'rx 6750 xt': 15.5, 'rx 6700 xt': 13.3, 'rx 6600 xt': 10.4, 'rx 6600': 8.9}  # populated below from the audited reference table
-
-
-def _run(args):
-    options = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
-    return subprocess.check_output(args, timeout=3, text=True, stderr=subprocess.DEVNULL, **options)
-
-
-@lru_cache(maxsize=1)
-def cpu_snapshot():
-    import cpuinfo
-    data = cpuinfo.get_cpu_info()
-    cache = data.get("l3_cache_size", 0)
-    return {"brand": data.get("brand_raw", "Unknown"), "cores": psutil.cpu_count() or 0,
-            "cache": {"l3": cache if isinstance(cache, (int, float)) else 0}}, " ".join(data.get("flags", []))
-
-
-def inspect_hardware():
-    cpu, flags = cpu_snapshot()
-    memory = psutil.virtual_memory()
-    controllers, detection_error = [], False
-    try:
-        if sys.platform == "win32":
-            raw = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,AdapterRAM | ConvertTo-Json -Compress"])
-            rows = json.loads(raw)
-            for row in rows if isinstance(rows, list) else [rows]:
-                controllers.append({"model": row.get("Name", ""), "vendor": row.get("AdapterCompatibility", ""),
-                                    "vram": (row.get("AdapterRAM") or 0) / 1024**2})
-        elif sys.platform == "darwin":
-            rows = json.loads(_run(["system_profiler", "SPDisplaysDataType", "-json"]))
-            for row in rows.get("SPDisplaysDataType", []):
-                controllers.append({"model": row.get("sppci_model", ""), "vendor": row.get("spdisplays_vendor", "")})
-        elif shutil.which("lspci"):
-            for line in _run(["lspci"]).splitlines():
-                if re.search(r"VGA|3D controller|Display controller", line, re.I):
-                    controllers.append({"model": line.split(": ", 1)[-1], "vendor": ""})
-        if shutil.which("nvidia-smi"):
-            rows = _run(["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"])
-            nvidia = []
-            for row in rows.splitlines():
-                name, total, free = row.rsplit(",", 2)
-                nvidia.append({"model": name.strip(), "vendor": "NVIDIA", "vram": float(total), "memoryFree": float(free)})
-            controllers = [c for c in controllers if classify_vendor(c.get("vendor", ""), c["model"]) != "nvidia"] + nvidia
-    except (OSError, subprocess.SubprocessError, ValueError):
-        detection_error = True
-    backend = "metal" if sys.platform == "darwin" else "unknown"
-    # Inspect the actual standalone Ollama installation instead of inventing a
-    # backend based merely on the GPU vendor.
-    binary = shutil.which("ollama")
-    if binary and backend != "metal":
-        for root in (Path(binary).parent / "lib" / "ollama", Path(binary).parent / "lib", Path("/usr/lib/ollama")):
-            if root.is_dir():
-                entries = [p.name.lower() for p in root.iterdir()]
-                backend = "rocm" if any("rocm" in p for p in entries) else "cuda" if any("cuda" in p for p in entries) else "cpu"
-                break
-    return {"cpu": cpu, "flags": flags, "mem": {"total": memory.total, "available": memory.available},
-            "controllers": controllers, "backend": backend, "gpuDetectionFailed": detection_error}
 
 
 def classify_vendor(vendor, model):

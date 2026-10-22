@@ -25,7 +25,9 @@ dependencies = [
   "certifi>=2024.2.2",
   "cryptography>=43",
   "psutil>=6",
-  "py-cpuinfo>=9",
+  "nvidia-ml-py>=12",
+  "httptools>=0.8,<0.9",
+  "ada-url>=1.15,<5",
 ]
 
 [project.optional-dependencies]

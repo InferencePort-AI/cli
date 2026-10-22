@@ -309,7 +309,13 @@ def test_real_detached_cli_lifecycle(home, ollama, monkeypatch):
     def run(*args):
         options = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
         result = subprocess.run(command + list(args), env=dict(os.environ), capture_output=True, text=True, timeout=25, **options)
-        assert result.returncode == 0, result.stderr
+        diagnostics = ""
+        if result.returncode:
+            from ipx.config import config_dir
+            for name in ("server-process.log", "InferencePort-Server.log", "server.pid"):
+                path = config_dir() / name
+                if path.exists(): diagnostics += f"\n{name}:\n" + path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        assert result.returncode == 0, result.stderr + diagnostics
         return json.loads(result.stdout)
     try:
         assert run("start", "--host", "127.0.0.1", "--port", str(port), "--generate-key", "--detach")["running"]
