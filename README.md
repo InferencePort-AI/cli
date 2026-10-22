@@ -155,8 +155,9 @@ System One providers and retail prices are configured by the backend operator in
 including `GET /__inferenceport/crypto-capabilities`,
 `POST /__inferenceport/crypto-handshake`, one-hour sessions, and `POST /sysinfo`
 hardware ratings. The Python server needs no Node.js or Electron installation.
-Dependencies include cryptography, psutil and py-cpuinfo; GPU inspection uses
-platform tools and optionally nvidia-smi. CPU inspection is cached; available
+Dependencies include cryptography, psutil, native llhttp/WHATWG bindings and
+NVIDIA NVML. GPU inspection uses native 64-bit registry/DXGI values on Windows,
+DRM counters on Linux and profiler records on macOS; nvidia-smi is not required. CPU inspection is cached; available
 RAM is refreshed per rating. Unknown measurements are reported as unknown.
 
 Use `--allow EMAIL[:admin|member]` for service-verified access tokens and
@@ -182,4 +183,9 @@ which appear in connection logs.
 
 See [the protocol audit, endpoint matrix, validation and remaining gaps](docs/server-parity.md).
 Exact parity is **not yet certified**; that document records explicit security
-deviations and outstanding platform/HTTP-parser validation.
+deviations and native collector/HTTP-parser validation evidence.
+
+Set `IPX_OLLAMA_VENDOR_ROOT` to the desktop `vendor/electron-ollama` directory to
+rate the identical bundled build. Otherwise the CLI inspects its actual standalone
+Ollama installation. Native collection and malformed HTTP cases run in differential
+CI on Windows, Linux and macOS.

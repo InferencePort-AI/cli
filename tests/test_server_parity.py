@@ -275,6 +275,7 @@ def test_ssrf_security_deviation(python_host):
     server = python_host()
     assert request(server.httpd.server_port, "GET", "//evil.test/", "key")[0] == 400
     assert request(server.httpd.server_port, "GET", "HTTP://evil.test/", "key")[0] == 400
+    assert request(server.httpd.server_port, "GET", "/\\evil.test/", "key")[0] == 400
 
 def test_forwarded_request_headers(reference, python_host, ollama):
     ollama.route("POST", "/api/chat", lambda rec: (200, {}, {"headers": rec["headers"]}))
@@ -409,15 +410,25 @@ def raw_exchange(port, data):
     finally:
         conn.close()
     wire = re.sub(rb"(?im)^date: [^\r\n]*\r\n", b"", b"".join(parts))
-    if not wire: return wire
-    head, _, body = wire.partition(b"\r\n\r\n")
-    lines = head.split(b"\r\n")
-    # Field ordering/casing is semantically unordered; duplicate values,
-    # framing headers and the actual framed body remain in the comparison.
-    return lines[0], sorted((k.lower(), v.strip()) for line in lines[1:] for k, _, v in [line.partition(b":")]), body
+    def canonical(message):
+        if not message: return message
+        head, _, body = message.partition(b"\r\n\r\n")
+        lines = head.split(b"\r\n")
+        status = int(lines[0].split()[1])
+        if 100 <= status < 200: body = canonical(body)
+        # Header order/casing is semantically unordered. Preserve duplicates,
+        # framing, and every body byte, including subsequent final responses.
+        return lines[0], sorted((k.lower(), v.strip()) for line in lines[1:] for k, _, v in [line.partition(b":")]), body
+    return canonical(wire)
 
 
 RAW_CASES = [
+    b"GET / HTTP/1.1\r\nHost:\r\nConnection: close\r\n\r\n",
+    b"GET /\r\n\r\n",
+    b"POST / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nExpect: unsupported\r\nContent-Length: 0\r\n\r\n",
+    b"POST /sysinfo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: Bearer key\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\n{}",
+    b"GET /api/tags HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: Bearer key\t \r\n\r\n",
+    b"GET /api/tags HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: Bearer key\r\nX-Duplicate: first\r\nX-Duplicate: second\r\nCookie: a=1\r\nCookie: b=2\r\n\r\n",
     b"BOGUS / HTTP/1.1\r\nHost: x\r\n\r\n",
     b"GET / HTTP/2.0\r\nHost: x\r\nConnection: close\r\n\r\n",
     b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
@@ -503,3 +514,32 @@ def test_header_overflow_boundary(reference, python_host, size):
     wire = b"GET /__health HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX: " + b"x" * size + b"\r\n\r\n"
     server = python_host()
     assert raw_exchange(server.httpd.server_port, wire) == raw_exchange(reference, wire)
+
+
+def test_oversized_header_before_line_termination(reference, python_host):
+    wire = b"GET / HTTP/1.1\r\nHost: x\r\nX-Large: " + b"a" * 18000
+    server = python_host()
+    expected = raw_exchange(reference, wire)
+    assert expected[0] == b"HTTP/1.1 431 Request Header Fields Too Large"
+    assert raw_exchange(server.httpd.server_port, wire) == expected
+
+
+def test_header_count_limit(reference, python_host, ollama):
+    ollama.route("GET", "/api/tags", lambda rec: (200, {}, {"x_end": rec["headers"].get("x-end"), "x": rec["headers"].get("x")}))
+    wire = b"GET /api/tags HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer key\r\nConnection: close\r\n" + b"X:\r\n" * 2000 + b"X-End: excluded\r\n\r\n"
+    server = python_host()
+    assert raw_exchange(server.httpd.server_port, wire) == raw_exchange(reference, wire)
+
+
+@pytest.mark.parametrize("reference_env", [{"PARITY_HTTP_SETTINGS": json.dumps({"keepAliveTimeout": 50, "keepAliveTimeoutBuffer": 50})}], indirect=True)
+def test_keepalive_idle_buffer(reference, reference_env, python_host):
+    from ipx.server_http import HTTPSettings
+    server = python_host(http_settings=HTTPSettings(keep_alive_timeout=.05, keep_alive_timeout_buffer=.05))
+    for port in (reference, server.httpd.server_port):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("GET", "/__health")
+        response = conn.getresponse()
+        assert response.status == 204 and response.getheader("keep-alive") == "timeout=0"
+        response.read()
+        assert conn.sock.recv(1) == b""
+        conn.close()

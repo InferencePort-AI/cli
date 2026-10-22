@@ -65,7 +65,8 @@ token first 6 chars followed by stars. Connection logging includes raw query.
 
 The reference resolves network-path URLs (//host/path) against Ollama, permitting
 SSRF. Uppercase HTTP schemes also evade its case-sensitive absolute-URL guard.
-Python rejects network-path targets and all absolute schemes rather than reproduce
+Python rejects network-path targets, absolute schemes and resolved cross-origin
+WHATWG targets (including mixed slash/backslash paths) rather than reproduce
 these flaws.
 The reference's malformed-envelope fallback permits plaintext requests within a
 session; preserve wire compatibility, but never interpret failed ciphertext as
@@ -112,24 +113,11 @@ malformed sysinfo, hardware warnings/tiers, and real secure-client interoperabil
 
 ### Requirements explicitly incomplete (do not advertise exact 1:1 parity)
 
-* Native hardware collection is platform-adapted, not a reimplementation of
-  systeminformation. Win32 AdapterRAM may truncate large VRAM capacities without
-  nvidia-smi; Linux lspci does not supply AMD free VRAM; macOS shared-memory GPUs
-  have no dedicated VRAM measurement. CPU brand/cache/flag discovery and memory
-  accounting may differ. Scoring with identical measured snapshots is compared,
-  but native collectors have not been validated on Linux/macOS hardware here.
-  Ollama acceleration libraries are inspected in the CLI's standalone install,
-  rather than the desktop's bundled vendor directory.
-* HTTP parsing uses BaseHTTPRequestHandler, not llhttp. Malformed/duplicate
-  headers, unsupported transfer codings, CONNECT/upgrade, HTTP/1.0, ambiguous
-  framing, percent-encoded dot segments, request/header deadlines and oversized
-  headers are not proven equivalent. Node's default request/header timeout
-  behavior has not been fully ported. Keep-alive idle expiration is implemented.
 * Forwarding uses a new Python HTTPConnection per request rather than Node's
   global connection pool; duplicate response headers other than Set-Cookie are currently collapsed.
   Upstream truncation and every possible chunk/trailer boundary need further
   protocol-level tests. This is not byte-for-byte TCP packet equivalence.
-* cryptography's GCM adapter supports nonces of 8â€“128 bytes; the actual desktop
+* cryptography's GCM adapter supports nonces of 8Ã¢â‚¬â€œ128 bytes; the actual desktop
   client always uses 12. Exotic otherwise-valid Node GCM nonces outside that
   range are not reproduced. Standard client ciphertexts interoperate.
 * CLI organization policy is checked at startup and refreshed on a five-minute
@@ -155,12 +143,76 @@ not an unexplained mismatch. No desktop production code is modified.
 
 Windows, Python 3.12, Node 24.11.0:
 
-* Full suite: `python -m pytest tests --import-mode=importlib -o addopts='' -q --disable-warnings` — **405 passed, 36 warnings**, 109.96 s. Warnings come from realtime test-server thread cancellation.
-* `python -m ruff check src tests packaging` — passed.
-* `python -m compileall -q src/ipx/proxy.py src/ipx/server_crypto.py src/ipx/server_hardware.py src/ipx/commands/server.py` — passed.
-* `python packaging/check_versions.py` — all versions agree.
-* Real desktop secure-fetch handshake/encrypted request and actual detached CLI start/status/stop — passed as part of the suite.
-* Real local hardware-rating smoke test — returned measured CPU/RAM/GPU detection and a rating.
-* Desktop source working tree — unchanged.
+* Full suite: `python -m pytest tests --import-mode=importlib -o addopts='' -q --disable-warnings` â€” **405 passed, 36 warnings**, 109.96 s. Warnings come from realtime test-server thread cancellation.
+* `python -m ruff check src tests packaging` â€” passed.
+* `python -m compileall -q src/ipx/proxy.py src/ipx/server_crypto.py src/ipx/server_hardware.py src/ipx/commands/server.py` â€” passed.
+* `python packaging/check_versions.py` â€” all versions agree.
+* Real desktop secure-fetch handshake/encrypted request and actual detached CLI start/status/stop â€” passed as part of the suite.
+* Real local hardware-rating smoke test â€” returned measured CPU/RAM/GPU detection and a rating.
+* Desktop source working tree â€” unchanged.
 
 Cross-platform CI has been configured; results are not claimed before it runs.
+
+
+## Follow-up: native measurement and HTTP parsing
+
+The original two hardware/parser gaps now have native implementations and
+cross-platform validation, rather than waived acceptance criteria.
+
+CPU inputs use Windows CIM plus registry FeatureSet, Linux lscpu/procfs and macOS
+sysctl. Brand normalization, logical core counts and cache byte units follow
+systeminformation 5.33.x. Memory uses Linux MemAvailable, native Windows physical
+memory and macOS total-minus-active pages with the OS page size (16 KiB on Apple
+Silicon). The local live comparison matched CPU brand, cores, L3 cache, flags and
+total RAM exactly. Available-memory samples are sequential and can change.
+
+Windows GPU capacity first reads 64-bit HardwareInformation.qwMemorySize by PCI
+identifier and falls back to native DXGI SIZE_T capacity. It no longer relies on
+32-bit AdapterRAM truncation. NVIDIA NVML queries total/free memory directly from
+the driver, without requiring nvidia-smi. Linux AMD DRM mem_info_vram_total/used
+provides actual adapter-wide free VRAM; PCI enumeration retains adapters without
+DRM nodes. macOS parses the same system_profiler XML records and GB/MB shared
+VRAM fields. Apple unified RAM is not counted twice as dedicated VRAM; absent
+VRAM measurements remain null. Failed optional driver probes retain successful
+OS results. DXGI per-process budgets are NOT labeled as adapter free memory.
+
+Native accuracy can exceed desktop fallback accuracy: DXGI capacity overrides
+ambiguous/truncated WMI AdapterRAM, and AMD DRM supplies a free-memory hint where
+the desktop lacks one. These are explicit measurement improvements, while the
+rating algorithm and output schema are unchanged. The Windows FeatureSet flags
+retain the reference algorithm, including its omission of CPUID leaf 7 AVX2 and
+AVX512, so the score is not silently changed.
+
+Set IPX_OLLAMA_VENDOR_ROOT to the exact desktop vendor/electron-ollama directory
+to inspect the same lib/ollama build. That explicit root takes precedence over
+standalone installs. Otherwise the CLI inspects the Ollama installation it
+actually serves. ROCm-before-CUDA precedence and macOS metal match the reference.
+
+The server no longer imports BaseHTTPRequestHandler or HTTPServer. Native
+httptools/llhttp validates HTTP framing, and native ada-url implements WHATWG URL
+resolution, including percent-encoded dot segments. No Node/Electron runtime is
+required. The transport implements first-value singleton headers (including
+Authorization), joined duplicate custom headers/cookies, CL/TE rejection, chunk
+validation, CONNECT/upgrade handling, HTTP/1.0 framing, required Host, unread-body
+draining, parser error responses, 16 KiB header limits and the 1000-field (2000 raw name/value pairs) limit.
+Node defaults are reproduced: 60-second header receipt, 300-second total request
+receipt, 30-second deadline scans, and 5-second keep-alive plus the 1-second socket
+buffer. Completed request bodies clear receipt deadlines, so long inference is
+not timed out. Scaled deadline tests run the same inputs against real Node
+server options; there are no production test bypasses.
+
+Raw-wire tests cover malformed methods/versions/headers, duplicate lengths,
+CL+TE, unsupported coding, invalid chunks, missing Host, HTTP/1.0, CONNECT and
+upgrade, duplicate Authorization, header-size boundaries and encoded dot paths.
+Native fixtures cover >4 GiB Windows capacity, DXGI fallback, AMD free VRAM,
+Apple unified memory, native page size and NVML outages. Live native collectors
+are compared with real systeminformation in Windows/Linux/macOS differential CI.
+
+The original Linux client-test failure came from a fixed-port collision. The
+unchanged desktop secure client still uses logical port 52458; its test network
+adapter maps to an ephemeral listener. Detached startup now avoids HTTPServer's
+synchronous reverse-DNS lookup, publishes the PID atomically and records useful
+process/server diagnostics on startup failure. macOS tests remain enabled.
+
+Local follow-up server/hardware suite: 150 passed. Updated CI results are tracked
+on the pull request; they are not claimed before completion.

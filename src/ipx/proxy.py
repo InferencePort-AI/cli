@@ -319,6 +319,10 @@ class ProxyServer:
 
     def _forward(self, h, cors, body):
         target_url = URL(h.path, self.ollama_url)
+        # WHATWG treats backslashes as slashes for HTTP URLs. Reject every
+        # resolved cross-origin target, including mixed /\ network paths.
+        if target_url.origin != URL(self.ollama_url).origin:
+            return self._send(h, 400, {"error": "Absolute URLs not allowed"}, cors)
         target = urllib.parse.urlsplit(target_url.href)
         path = urllib.parse.urlunsplit(("", "", target.path or "/", target.query, ""))
         self.log.line("INFO", f"[Proxy] Forwarding -> {h.command} {target.scheme}://{target.netloc}{target.path}")

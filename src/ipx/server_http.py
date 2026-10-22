@@ -19,7 +19,7 @@ import httptools
 @dataclass(frozen=True)
 class HTTPSettings:
     max_header_size: int = 16384
-    max_headers_count: int = 2000
+    max_headers_count: int = 1000
     headers_timeout: float = 60
     request_timeout: float = 300
     connections_checking_interval: float = 30
@@ -40,7 +40,7 @@ class Headers:
     """IncomingMessage.headers duplicate-field rules, including first auth."""
     SINGLE = frozenset("age authorization content-length content-type etag expires from host if-modified-since if-unmodified-since last-modified location max-forwards proxy-authorization referer retry-after server user-agent".split())
 
-    def __init__(self, pairs, maximum=2000):
+    def __init__(self, pairs, maximum=1000):
         self.data = {}
         for key, value in pairs[:maximum]:
             key = key.lower()
@@ -223,19 +223,29 @@ class Request(socketserver.StreamRequestHandler):
                     self.connection.settimeout(self.settings.keep_alive_timeout + self.settings.keep_alive_timeout_buffer)
                 else:
                     self.connection.settimeout(None)
+                pending_line = bytearray()
+                first_line = True
                 while not self.headers_complete:
-                    line = self.rfile.readline(self.settings.max_header_size * 4 + 1)
+                    line = self.rfile.readline(1024)
+                    pending_line.extend(line)
                     if not line: return
                     if self.idle:
                         self.idle = False
                         self.connection.settimeout(None)
                         self.request_started = time.monotonic()
                         self.expires = self.request_started + timeout if timeout else None
-                    if len(line) > self.settings.max_header_size * 4: raise ProtocolError(431)
                     self.feed(line)
+                    if not self.headers_complete and not first_line:
+                        key, sep, value = bytes(pending_line).partition(b":")
+                        size = len(key) + len(value.strip(b" \t\r\n")) if sep else len(pending_line)
+                        if self.header_size + size >= self.settings.max_header_size:
+                            raise ProtocolError(431)
+                    if line.endswith(b"\n"):
+                        first_line = False
+                        pending_line.clear()
                 if self.aborted: return
                 # Node requireHostHeader (HTTP/1.1 only), before application route.
-                if self.request_version == "HTTP/1.1" and not self.headers.get("host"):
+                if self.request_version == "HTTP/1.1" and self.headers.get("host") is None:
                     self.send_response_only(400)
                     self.send_header("Connection", "close")
                     self.send_header("Date", self.date_time_string())
