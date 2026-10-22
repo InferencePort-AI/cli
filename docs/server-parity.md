@@ -162,8 +162,8 @@ cross-platform validation, rather than waived acceptance criteria.
 CPU inputs use Windows CIM plus registry FeatureSet, Linux lscpu/procfs and macOS
 sysctl. Brand normalization, logical core counts and cache byte units follow
 systeminformation 5.33.x. Memory uses Linux MemAvailable, native Windows physical
-memory and macOS total-minus-active pages with the OS page size (16 KiB on Apple
-Silicon). The local live comparison matched CPU brand, cores, L3 cache, flags and
+memory and macOS total minus anonymous-minus-purgeable-plus-wired-plus-compressed pages,
+using the OS page size (16 KiB on Apple Silicon). The local live comparison matched CPU brand, cores, L3 cache, flags and
 total RAM exactly. Available-memory samples are sequential and can change.
 
 Windows GPU capacity first reads 64-bit HardwareInformation.qwMemorySize by PCI
@@ -237,3 +237,17 @@ removes the observer process startup/exit footprint from the comparison. The
 reference must lie within the observed native before/after range plus a 64 MiB
 command-scheduling margin; static totals and OS accounting fixtures still compare
 exactly. Native measurements and application rating behavior are not changed.
+
+
+### Exact dependency audit correction
+
+The desktop lockfile pins systeminformation 5.33.15, but the local desktop
+node_modules had stale 5.31.7 files. The locked package was fetched separately and
+its SHA-512 verified against package-lock.json. The relevant CPU flags, brand,
+cache and controller algorithms were re-audited against those exact files.
+The substantive memory change is macOS: 5.33.15 counts anonymous - purgeable +
+wired + compressed pages as active/unreclaimable. Python now uses that exact
+formula; the fixture includes all four counters and deliberately different
+Pages-active values to catch regression to the stale algorithm. Local reference
+probes use the verified locked package via IPX_SYSTEMINFORMATION_PATH, and CI
+already installs that exact dependency version.

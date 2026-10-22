@@ -112,11 +112,14 @@ def memory_snapshot():
         total = number("memtotal") or total
         available = number("memavailable") or sum(number(k) for k in ("memfree", "buffers", "cached", "slab"))
     elif sys.platform == "darwin":
-        # systeminformation: available = free + (used - active), i.e.
-        # total - active; page size is 16 KiB on Apple Silicon, not 4 KiB.
+        # systeminformation 5.33.15 (locked by desktop) counts unreclaimable
+        # anonymous - purgeable + wired + compressed pages, not Pages active.
+        # Apple Silicon uses 16 KiB pages; Intel Macs generally use 4 KiB.
         page_size = int(run(["sysctl", "-n", "vm.pagesize"]).strip())
         pages = values(run(["vm_stat"]))
-        active = int(pages.get("pages active", "0").rstrip("."))
+        count = lambda key: int(pages.get(key, "0").rstrip("."))
+        active = (count("anonymous pages") - count("pages purgeable")
+                  + count("pages wired down") + count("pages occupied by compressor"))
         available = total - active * page_size
     return {"total": total, "available": available}
 

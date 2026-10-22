@@ -62,8 +62,8 @@ def test_macos_unified_memory_is_not_double_counted(monkeypatch):
 def test_macos_available_memory_uses_native_page_size(monkeypatch):
     monkeypatch.setattr(native.sys, "platform", "darwin")
     monkeypatch.setattr(native.psutil, "virtual_memory", lambda: SimpleNamespace(total=32*native.GIB, available=1))
-    monkeypatch.setattr(native, "run", lambda args: "16384" if args[0] == "sysctl" else "Pages active: 100000.\nPages inactive: 200000.")
-    assert native.memory_snapshot() == {"total": 32*native.GIB, "available": 32*native.GIB-100000*16384}
+    monkeypatch.setattr(native, "run", lambda args: "16384" if args[0] == "sysctl" else "Pages active: 700000.\nPages inactive: 200000.\nAnonymous pages: 100000.\nPages purgeable: 20000.\nPages wired down: 30000.\nPages occupied by compressor: 40000.")
+    assert native.memory_snapshot() == {"total": 32*native.GIB, "available": 32*native.GIB-150000*16384}
 
 
 def test_linux_memory_accounting_matches_memavailable(monkeypatch):
