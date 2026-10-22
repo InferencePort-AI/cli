@@ -1,63 +1,76 @@
-"""The `ipx server` host proxy: share your local Ollama with approved InferencePort users.
-
-Behaviour matches the desktop app's host server (port 52458):
-  * every request needs `Authorization: Bearer <token>`: a server API key, or an InferencePort access token that
-    is verified (with the verify_token_with_email function) against the allowed-users list;
-  * non-admin users are read-only (no pull / delete / create / run style writes);
-  * `GET /__health` answers 204;
-  * everything else is streamed through to Ollama.
-
-The desktop's optional end-to-end encryption handshake is not implemented. The capabilities probe answers
-`supported: false`, which makes desktop clients fall back to plain HTTP(S) exactly as they do for older servers.
-"""
-
+"""Standalone desktop-compatible hosting protocol; see docs/server-parity.md."""
 from __future__ import annotations
 
 import hashlib
 import http.client
 import json
+import os
 import re
+import socket
 import threading
 import time
 import urllib.parse
-from collections import defaultdict, deque
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+
+from ada_url import URL
 
 from ipx.config import Config, Credentials, config_dir
-from ipx.errors import ApiError, IpxError
-from ipx.http import raw_request
+from ipx.server_crypto import Sessions, decrypt_body
+from ipx.server_http import BodyTooLarge, HTTPServer
 
 MAX_BODY = 20 * 1024 * 1024
 MAX_LOG = 10 * 1024 * 1024
-RATE_LIMIT = 240  # requests per minute per client address
+RATE_LIMIT = 30
 CAPABILITIES = "/__inferenceport/crypto-capabilities"
 HANDSHAKE = "/__inferenceport/crypto-handshake"
 WRITE_PATTERN = re.compile(r"pull|rm|delete|create|models|run", re.I)
-ALLOWED_ORIGINS = ("https://inference.js.org",)
-HOP = {"host", "connection", "keep-alive", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
-       "authorization", "x-inferenceport-session", "content-length"}
+ALLOWED_ORIGINS = ("http://localhost:52458", "https://inference.js.org")
+HOP = {"host", "authorization", "connection", "content-length", "transfer-encoding", "upgrade",
+       "proxy-authorization", "proxy-authenticate", "te", "trailers"}
+
+
+def js_truthy(value):
+    return not (value is None or value is False or isinstance(value, (str, int, float)) and not value)
+
+
+def parse_json(raw):
+    def invalid(value):
+        raise ValueError(f"Unexpected token {value}")
+    return json.loads(raw, parse_constant=invalid)
 
 
 def log_path():
-    return config_dir() / "server.log"
+    return config_dir() / "InferencePort-Server.log"
+
+
+def sanitize(s: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", re.sub(r"[\r\n\t]", " ", s)).strip()
+
+
+def hash_ip(ip: str) -> str:
+    return "unknown" if ip == "unknown" else hashlib.sha256(ip.encode()).hexdigest()[:8]
+
+
+def mask(token: str) -> str:
+    return "undefined" if not token else token[:6] + "*" * max(0, len(token) - 6) if len(token) > 6 else "*" * len(token)
 
 
 class ServerLog:
-    def __init__(self, echo: bool = False) -> None:
-        self.lock = threading.Lock()
-        self.echo = echo
-        try:
-            if log_path().exists() and log_path().stat().st_size > MAX_LOG:
-                log_path().write_text("", encoding="utf-8")
-        except OSError:
-            pass
+    def __init__(self, echo=False):
+        self.lock, self.echo = threading.Lock(), echo
+        fd = os.open(log_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.close(fd)
 
-    def line(self, level: str, msg: str) -> None:
-        text = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {msg}"
+    def line(self, level, msg):
+        stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        text = f"[{stamp}] [{level}] {sanitize(msg)}"
         with self.lock:
             try:
-                with open(log_path(), "a", encoding="utf-8") as fh:
+                p = log_path()
+                if p.stat().st_size >= MAX_LOG:
+                    p.rename(p.with_name(f"InferencePort-Server-{int(time.time() * 1000)}.log"))
+                fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as fh:
                     fh.write(text + "\n")
             except OSError:
                 pass
@@ -65,215 +78,305 @@ class ServerLog:
             print(text, flush=True)
 
 
-def hash_ip(ip: str) -> str:
-    return hashlib.sha256(ip.encode()).hexdigest()[:10]
-
-
-def mask(token: str) -> str:
-    return token[:4] + "…" + token[-3:] if len(token) > 10 else "***"
-
-
-def sanitize(s: str) -> str:
-    return re.sub(r"[\r\n\t]", " ", s)[:200]
-
-
 class RateLimiter:
-    def __init__(self, per_minute: int) -> None:
-        self.per = per_minute
-        self.hits: Dict[str, Deque[float]] = defaultdict(deque)
-        self.lock = threading.Lock()
+    def __init__(self, per_minute=RATE_LIMIT):
+        self.per, self.hits, self.lock = per_minute, {}, threading.Lock()
 
-    def allow(self, key: str) -> bool:
-        now = time.time()
+    def allow(self, key):
+        now = int(time.time() * 1000)
         with self.lock:
-            q = self.hits[key]
-            while q and now - q[0] > 60:
-                q.popleft()
-            if len(q) >= self.per:
+            count, reset = self.hits.get(key, (0, -1))
+            if now > reset:
+                count, reset = 0, now + 60000
+            if count >= self.per:
                 return False
-            q.append(now)
+            self.hits[key] = count + 1, reset
             return True
 
 
 class Verifier:
-    """Verifies InferencePort access tokens through the verify_token_with_email edge function."""
-
-    def __init__(self, cfg: Config, creds: Credentials) -> None:
+    def __init__(self, cfg: Config, creds: Credentials):
         from ipx.auth import supabase_config
-
-        sb = supabase_config(cfg)
-        self.url = sb["url"] + "/functions/v1/verify_token_with_email"
-        self.key = sb["publishableKey"]
+        self.url = supabase_config(cfg)["url"] + "/functions/v1/verify_token_with_email"
         self.cfg, self.creds = cfg, creds
 
-    def verify(self, token: str, emails: List[str]) -> Tuple[int, Optional[Dict[str, Any]]]:
-        from ipx.auth import refresh
-
-        if self.creds.expiring():
-            refresh(self.cfg, self.creds)
-        host_token = self.creds.access_token or self.key
+    def verify(self, token, emails):
+        headers = {"Content-Type": "application/json"}
         try:
-            r = raw_request("POST", self.url, json={"token": token, "emails": emails},
-                            headers={"Authorization": f"Bearer {host_token}", "apikey": self.key}, timeout=15)
-            return r.status, r.json()  # type: ignore[union-attr]
-        except ApiError as e:
-            return e.status, e.body if isinstance(e.body, dict) else None
-        except IpxError:
+            from ipx.auth import refresh
+            if self.creds.expiring():
+                refresh(self.cfg, self.creds)
+            if self.creds.auth_type == "jwt" and self.creds.access_token:
+                headers["Authorization"] = f"Bearer {self.creds.access_token}"
+        except Exception:
+            pass  # getSession failures do not prevent the reference verification request
+        url = urllib.parse.urlsplit(self.url)
+        cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+        conn = cls(url.hostname, url.port, timeout=None)
+        try:
+            body = json.dumps({"token": token, "emails": emails}, separators=(",", ":"), ensure_ascii=False).encode()
+            conn.putrequest("POST", url.path, skip_accept_encoding=True, skip_host=True)
+            for name, value in headers.items():
+                conn.putheader(name, value)
+            conn.putheader("Host", url.netloc)
+            conn.putheader("Connection", "keep-alive")
+            conn.putheader("Transfer-Encoding", "chunked")
+            conn.endheaders()
+            conn.send(f"{len(body):x}\r\n".encode() + body + b"\r\n0\r\n\r\n")
+            response = conn.getresponse()
+            raw = response.read()
+            try:
+                result = parse_json(raw)
+            except ValueError:
+                result = None
+            return response.status, result
+        except (OSError, http.client.HTTPException):
             return 500, None
+        finally:
+            conn.close()
 
 
 class ProxyServer:
-    def __init__(self, *, host: str, port: int, ollama_url: str, users: List[Dict[str, str]], api_keys: List[str],
-                 verifier: Optional[Verifier], echo: bool = False) -> None:
+    def __init__(self, *, host, port, ollama_url, users, api_keys, verifier, echo=False, http_settings=None):
         self.host, self.port = host, port
-        self.ollama = urllib.parse.urlparse(ollama_url)
-        self.users = {u["email"].lower(): (u.get("role") or "member").lower() for u in users}
-        self.api_keys = set(api_keys)
-        self.verifier = verifier
-        self.log = ServerLog(echo)
-        self.limiter = RateLimiter(RATE_LIMIT)
-        self.httpd: Optional[ThreadingHTTPServer] = None
+        self.http_settings, self.max_body = http_settings, MAX_BODY
+        self.ollama_url = ollama_url
+        self.ollama = urllib.parse.urlsplit(ollama_url)
+        self.users, self.api_keys, self.verifier = list(users), set(api_keys), verifier
+        self.log, self.limiter, self.sessions = ServerLog(echo), RateLimiter(), Sessions()
+        self.httpd = None
+        self.connections, self.connections_lock = set(), threading.Lock()
 
-    # -- lifecycle -----------------------------------------------------------
-    def serve(self, on_ready=None) -> None:
-        server = self
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-            server_version = "ipx"
-
-            def log_message(self, *a: Any) -> None:
-                pass
-
-            def do_GET(self) -> None: server._handle(self)       # noqa: E704,N802
-            def do_POST(self) -> None: server._handle(self)      # noqa: E704,N802
-            def do_PUT(self) -> None: server._handle(self)       # noqa: E704,N802
-            def do_DELETE(self) -> None: server._handle(self)    # noqa: E704,N802
-            def do_HEAD(self) -> None: server._handle(self)      # noqa: E704,N802
-            def do_OPTIONS(self) -> None: server._handle(self)   # noqa: E704,N802
-
-        self.httpd = ThreadingHTTPServer((self.host, self.port), Handler)
-        self.httpd.daemon_threads = True
-        self.log.line("INFO", f"Proxy server running on http://{self.host}:{self.port}")
+    def serve(self, on_ready=None):
+        httpd = HTTPServer((self.host, self.port), self, self.http_settings)
+        self.httpd = httpd
+        self.log.line("INFO", f"Proxy server running on http://localhost:{httpd.server_address[1]}")
         if on_ready:
-            on_ready()  # listening now - safe to advertise (pid file etc.)
+            on_ready()
         try:
-            self.httpd.serve_forever(poll_interval=0.5)
+            httpd.serve_forever(poll_interval=0.1)
         finally:
-            self.httpd.server_close()
+            httpd.server_close()
             self.log.line("INFO", "Proxy server stopped")
 
-    def shutdown(self) -> None:
+    def shutdown(self):
         if self.httpd:
+            with self.connections_lock:
+                for conn in self.connections:
+                    try:
+                        conn.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
             threading.Thread(target=self.httpd.shutdown, daemon=True).start()
 
-    # -- helpers ---------------------------------------------------------------
     @staticmethod
-    def _send(h: BaseHTTPRequestHandler, status: int, body: Optional[Dict[str, Any]] = None, extra: Optional[Dict[str, str]] = None) -> None:
-        data = json.dumps(body).encode() if body is not None else b""
-        h.send_response(status)
+    def _send(h, status, body=None, extra=None):
+        data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode() if body is not None else b""
+        chunked = h.request_version == "HTTP/1.1" and status != 204 and h.command != "HEAD"
+        if h.request_version != "HTTP/1.1": h.close_connection = True
+        h.send_response_only(status)
+        h.send_header("Date", h.date_time_string())
+        h.send_header("Connection", "close" if h.close_connection else "keep-alive")
+        if not h.close_connection:
+            h.send_header("Keep-Alive", f"timeout={int(h.settings.keep_alive_timeout)}")
         if body is not None:
             h.send_header("Content-Type", "application/json")
-        h.send_header("Content-Length", str(len(data)))
+        if chunked:
+            h.send_header("Transfer-Encoding", "chunked")
         for k, v in (extra or {}).items():
             h.send_header(k, v)
         h.end_headers()
-        if h.command != "HEAD":
-            h.wfile.write(data)
+        if h.command != "HEAD" and status != 204:
+            if chunked:
+                if data:
+                    h.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+                h.wfile.write(b"0\r\n\r\n")
+            else:
+                h.wfile.write(data)
 
-    def _cors(self, h: BaseHTTPRequestHandler) -> Dict[str, str]:
+    def _cors(self, h):
         origin = h.headers.get("Origin")
-        if origin in (f"http://localhost:{self.port}", *ALLOWED_ORIGINS):
+        if origin in ALLOWED_ORIGINS:
             return {"Access-Control-Allow-Origin": origin,
                     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
                     "Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Inferenceport-Session"}
         return {}
 
-    def _authorize(self, token: str) -> Tuple[int, Optional[Dict[str, Any]], str]:
-        """Returns (status, error_body, role). status 200 means allowed."""
-        if token in self.api_keys:
-            return 200, None, "admin"
-        if not self.verifier or not self.users:
-            return 401, {"error": "Token verification failed"}, "member"
-        status, result = self.verifier.verify(token, list(self.users))
+    def _verify(self, token):
+        return self.verifier.verify(token, [u["email"] for u in self.users]) if self.verifier else (500, None)
+
+    def _identity(self, token, session=None):
+        if session is None and token in self.api_keys:
+            matched = next((u for u in self.users if (u.get("role") or "").lower() == "admin"),
+                           self.users[0] if self.users else {"email": "__server_api_key__", "role": "admin"})
+            return 200, None, matched
+        self.log.line("INFO", f"Verifying {'session request token' if session else 'token'}: {mask(token)}")
+        status, result = self._verify(token)
+        result = result if isinstance(result, dict) else {}
         if status == 429:
-            msg = (result or {}).get("error") if isinstance(result, dict) else None
-            return 429, {"error": msg or "Token verification limit reached for today.", "notice": (result or {}).get("notice")}, "member"
-        if status != 200 or not result or not result.get("found") or not result.get("email"):
-            return 401, {"error": "Token verification failed"}, "member"
-        email = str(result["email"]).lower()
-        if email not in self.users:
-            return 403, {"error": "Access denied"}, "member"
-        return 200, None, self.users[email]
+            error = result.get("error")
+            body = {"error": error if isinstance(error, str) else "Token verification limit reached for today."}
+            if isinstance(result.get("notice"), str):
+                body["notice"] = result["notice"]
+            if result.get("usage") is not None:
+                body["usage"] = result["usage"]
+            return 429, body, None
+        if status != 200 or not js_truthy(result.get("found")) or not js_truthy(result.get("email")):
+            return 401, {"error": "Token verification failed"}, None
+        if session and result["email"] != session.email:
+            return 403, {"error": "Session token email mismatch"}, None
+        matched = next((u for u in self.users if u["email"] == result["email"]), None)
+        return (200, None, matched) if matched else (403, {"error": "Access denied"}, None)
 
-    # -- request handling --------------------------------------------------------
-    def _handle(self, h: BaseHTTPRequestHandler) -> None:
-        ip = h.client_address[0]
-        cors = self._cors(h)
-        path = h.path.split("?", 1)[0]
+    def _read(self, h):
+        return h.read_body()
+
+    def _handle(self, h):
+        try:
+            self._route(h)
+        except (BodyTooLarge, BrokenPipeError, ConnectionResetError):
+            h.close_connection = True
+
+    def _route(self, h):
+        ip, cors = h.client_address[0], self._cors(h)
+        path = h.path.split("?", 1)[0] or "/"
+        send = lambda status, body=None: self._send(h, status, body, cors)
         if h.command == "OPTIONS":
-            return self._send(h, 204 if cors else 403, None, cors)
-        if h.command == "GET" and path == "/__health":
-            return self._send(h, 204 if self.limiter.allow(ip) else 429, None, cors)
-
+            return send(204 if cors else 403)
+        if h.command == "GET" and h.path == "/__health":
+            return send(204 if self.limiter.allow(ip) else 429)
         auth = h.headers.get("Authorization", "")
         token = auth[7:].strip() if auth.startswith("Bearer ") else ""
-
         if h.command == "GET" and path == CAPABILITIES:
-            return self._send(h, 200, {"supported": False, "version": 1, "reason": "ipx-server-does-not-implement-encryption"}, cors)
+            supported = False
+            if token and token not in self.api_keys:
+                status, result = self._verify(token)
+                supported = status == 200 and isinstance(result, dict) and js_truthy(result.get("found")) and js_truthy(result.get("email"))
+            body = {"supported": supported, "version": 1}
+            if not supported:
+                body["reason"] = "api-verification-required"
+            return send(200, body)
+        self.log.line("INFO", f"[Connection] From={hash_ip(ip)} Path={sanitize(h.path or '/')}")
+        sid = h.headers.get("X-Inferenceport-Session", "").strip()
+        session = self.sessions.lookup(sid) if sid else None
+        if sid and not session:
+            return send(401, {"error": "Invalid or expired session"})
         if not token:
-            return self._send(h, 401, {"error": "Missing Authorization header"}, cors)
-        if h.headers.get("X-Inferenceport-Session") or path == HANDSHAKE:
-            return self._send(h, 400, {"error": "Encrypted sessions are not supported by this server; retry without encryption"}, cors)
-        if not self.limiter.allow(ip):
-            return self._send(h, 429, {"error": "Too many requests"}, cors)
-
-        self.log.line("INFO", f"[Connection] From={hash_ip(ip)} Path={sanitize(h.path)} Token={mask(token)}")
-        status, err, role = self._authorize(token)
+            return send(401, {"error": "Missing Authorization header"})
+        status, error, matched = self._identity(token, session)
         if status != 200:
-            return self._send(h, status, err, cors)
-        if role != "admin" and h.command not in ("GET", "HEAD") and WRITE_PATTERN.search(h.path):
-            return self._send(h, 403, {"error": "Insufficient permissions"}, cors)
-        if path == "/sysinfo":
-            return self._send(h, 501, {"error": "Hardware rating is not available on this server"}, cors)
-        self._forward(h, cors)
+            return send(status, error)
+        if h.command == "POST" and path == HANDSHAKE:
+            try:
+                raw = self._read(h)
+                try:
+                    obj = parse_json(raw.decode("utf-8", "replace") or "{}")
+                except ValueError:
+                    return send(400, {"error": "Invalid JSON"})
+                if obj is None:
+                    return send(500, {"error": "Failed to read body"})
+                if not isinstance(obj, dict) or not all(isinstance(obj.get(k), str) for k in ("clientPublicKey", "clientNonce")):
+                    return send(400, {"error": "Missing clientPublicKey or clientNonce"})
+                try:
+                    payload = self.sessions.establish(obj["clientPublicKey"], obj["clientNonce"], matched["email"], matched.get("role"))
+                except ValueError as err:
+                    self.log.line("ERROR", f"Crypto handshake failed: {err}")
+                    return send(400, {"error": "Handshake failed"})
+                return send(200, payload)
+            except BodyTooLarge:
+                raise
+            except (OSError, ValueError):
+                return send(500, {"error": "Failed to read body"})
+        if (matched.get("role") or "member").lower() != "admin" and h.command != "GET" and WRITE_PATTERN.search(h.path):
+            return send(403, {"error": "Insufficient permissions"})
+        if not self.limiter.allow(ip):
+            return send(429)
+        if h.command == "POST" and path == "/sysinfo":
+            try:
+                raw = self._read(h)
+                if session:
+                    raw = decrypt_body(session.key, raw)
+            except BodyTooLarge:
+                raise
+            except (OSError, ValueError):
+                return send(500, {"error": "Sysinfo read failed"})
+            try:
+                obj = parse_json(raw.decode("utf-8", "replace") or "{}")
+                size = obj.get("modelSizeRaw") if isinstance(obj, dict) else None
+                if obj is None:
+                    raise ValueError("Cannot read properties of null")
+                if not js_truthy(size):
+                    return send(400, {"error": "Missing modelSizeRaw"})
+                from ipx.server_hardware import get_hardware_rating
+                return send(200, get_hardware_rating(size))
+            except Exception as err:
+                self.log.line("ERROR", f"Sysinfo error: {err}")
+                return send(520, {"error": "Sysinfo failure"})
+        if h.path.startswith("//") or urllib.parse.urlsplit(h.path).scheme:
+            return send(400, {"error": "Absolute URLs not allowed"})
+        raw = self._read(h)
+        self._forward(h, cors, decrypt_body(session.key, raw) if session else raw)
 
-    def _forward(self, h: BaseHTTPRequestHandler, cors: Dict[str, str]) -> None:
-        if h.path.startswith(("http://", "https://")) or h.path.startswith("//"):
+    def _forward(self, h, cors, body):
+        target_url = URL(h.path, self.ollama_url)
+        # WHATWG treats backslashes as slashes for HTTP URLs. Reject every
+        # resolved cross-origin target, including mixed /\ network paths.
+        if target_url.origin != URL(self.ollama_url).origin:
             return self._send(h, 400, {"error": "Absolute URLs not allowed"}, cors)
-        length = int(h.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
-            return self._send(h, 413, {"error": "Request body too large"}, cors)
-        body = h.rfile.read(length) if length else None
-        headers = {k: v for k, v in h.headers.items() if k.lower() not in HOP}
-        if body is not None:
-            headers["Content-Length"] = str(len(body))
-        self.log.line("INFO", f"[Proxy] Forwarding -> {sanitize(h.command)} {sanitize(h.path.split('?', 1)[0])}")
-        conn = http.client.HTTPConnection(self.ollama.hostname, self.ollama.port or 11434, timeout=600)
+        target = urllib.parse.urlsplit(target_url.href)
+        path = urllib.parse.urlunsplit(("", "", target.path or "/", target.query, ""))
+        self.log.line("INFO", f"[Proxy] Forwarding -> {h.command} {target.scheme}://{target.netloc}{target.path}")
+        headers = {k.lower(): v for k, v in h.headers.items() if k.lower() not in HOP}
+        if body:
+            headers["content-length"] = str(len(body))
+        conn = http.client.HTTPConnection(target.hostname, target.port or 80, timeout=None)
         try:
-            conn.request(h.command, h.path, body=body, headers=headers)
+            conn.putrequest(h.command, path, skip_accept_encoding=True, skip_host=True)
+            for k, v in headers.items():
+                conn.putheader(k, v)
+            conn.putheader("Host", target.netloc)
+            conn.putheader("Connection", "keep-alive")
+            if not body and h.command in ("POST", "PUT", "PATCH"):
+                conn.putheader("Content-Length", "0")
+            conn.endheaders(body if body and h.command not in ("GET", "HEAD") else None)
             resp = conn.getresponse()
-        except OSError as e:
-            self.log.line("ERROR", f"[Proxy] Request error: {e}")
-            return self._send(h, 502, {"error": "Ollama is not reachable on the host"}, cors)
+        except (OSError, http.client.HTTPException) as err:
+            conn.close()
+            self.log.line("ERROR", f"[Proxy] Request error: {err}")
+            return self._send(h, 500, {"error": "Proxy error"}, cors)
         try:
-            h.send_response(resp.status)
+            h.send_response_only(resp.status)
+            response_headers = {k.lower(): v for k, v in cors.items()}
+            response_headers.update({k.lower(): v for k, v in resp.getheaders() if k.lower() != "set-cookie"})
+            chunked = resp.getheader("transfer-encoding", "").lower() == "chunked"
+            has_body = h.command != "HEAD" and resp.status not in (204, 304) and resp.status >= 200
+            if not resp.getheader("content-length") and not chunked and has_body:
+                chunked = True
+                response_headers["transfer-encoding"] = "chunked"
+            if "connection" not in response_headers:
+                response_headers["connection"] = "close" if h.close_connection else "keep-alive"
+                if not h.close_connection:
+                    response_headers["keep-alive"] = f"timeout={int(h.settings.keep_alive_timeout)}"
+            if not resp.getheader("date"):
+                response_headers["date"] = h.date_time_string()
+            for k, v in response_headers.items():
+                h.send_header(k, v)
             for k, v in resp.getheaders():
-                if k.lower() in ("transfer-encoding", "connection", "content-length"):
-                    continue
-                h.send_header(k, v)
-            for k, v in cors.items():
-                h.send_header(k, v)
-            h.send_header("Transfer-Encoding", "chunked")
+                if k.lower() == "set-cookie":
+                    h.send_header(k, v)
+            if resp.getheader("connection", "").lower() == "close":
+                h.close_connection = True
             h.end_headers()
-            while True:
-                chunk = resp.read(8192) if resp.getheader("content-length") else resp.read1(8192)
-                if not chunk:
-                    break
-                h.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
-                h.wfile.flush()
-            h.wfile.write(b"0\r\n\r\n")
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            if has_body:
+                while True:
+                    part = resp.read1(65536)
+                    if not part:
+                        break
+                    h.wfile.write((f"{len(part):x}\r\n".encode() + part + b"\r\n") if chunked else part)
+                    h.wfile.flush()
+                if chunked:
+                    h.wfile.write(b"0\r\n\r\n")
+        except (OSError, http.client.HTTPException):
+            h.close_connection = True
         finally:
             conn.close()

@@ -91,10 +91,10 @@ def test_unlisted_or_bad_tokens_rejected(proxy):
     assert call(proxy, "GET", "/api/tags", "limited")[0] == 429
 
 
-def test_capabilities_says_unsupported_and_session_rejected(proxy):
+def test_capabilities_requires_verification_and_unknown_session_rejected(proxy):
     status, body = call(proxy, "GET", "/__inferenceport/crypto-capabilities")
     assert status == 200 and json.loads(body)["supported"] is False
-    assert call(proxy, "GET", "/api/tags", "ipxs_key", headers={"X-Inferenceport-Session": "abc"})[0] == 400
+    assert call(proxy, "GET", "/api/tags", "ipxs_key", headers={"X-Inferenceport-Session": "abc"})[0] == 401
 
 
 def test_absolute_url_rejected(proxy):
@@ -113,7 +113,7 @@ def test_cors_only_for_known_origins(proxy):
     assert c.getresponse().status == 204
 
 
-def test_ollama_down_gives_502(home):
+def test_ollama_down_gives_500(home):
     from ipx.proxy import ProxyServer
 
     srv = ProxyServer(host="127.0.0.1", port=0, ollama_url="http://127.0.0.1:1", users=[], api_keys=["k"], verifier=None)
@@ -124,14 +124,14 @@ def test_ollama_down_gives_502(home):
             break
         time.sleep(0.02)
     srv.port = srv.httpd.server_address[1]
-    assert call(srv, "GET", "/api/tags", "k")[0] == 502
+    assert call(srv, "GET", "/api/tags", "k")[0] == 500
     srv.shutdown()
 
 
 def test_parse_users():
     from ipx.commands.server import parse_users
 
-    assert parse_users(["A@b.co", "c@d.io:admin"]) == [{"email": "a@b.co", "role": "member"}, {"email": "c@d.io", "role": "admin"}]
+    assert parse_users(["A@b.co", "c@d.io:admin"]) == [{"email": "A@b.co", "role": "member"}, {"email": "c@d.io", "role": "admin"}]
     with pytest.raises(IpxError):
         parse_users(["not-an-email"])
     with pytest.raises(IpxError):
@@ -275,3 +275,53 @@ def test_user_verification_requires_a_user_session(ipx):
     with pytest.raises(IpxError) as e:
         ipx("server", "start", "--allow", "a@b.co")
     assert "not an API key" in e.value.message
+
+
+def test_running_host_revoked_on_policy_change(monkeypatch):
+    from types import SimpleNamespace
+
+    from ipx.commands.server import monitor_host_policy
+    class Stop:
+        def wait(self, seconds):
+            assert seconds == 300
+            return False
+    stopped, logged = [], []
+    srv = SimpleNamespace(shutdown=lambda: stopped.append(True), log=SimpleNamespace(line=lambda *a: logged.append(a)))
+    monkeypatch.setattr("ipx.commands.server.policy.host_settings", lambda app: {"managed": True, "access": "members", "users": []})
+    monitor_host_policy(None, srv, [{"email": "removed@test", "role": "member"}], [], Stop())
+    assert stopped == [True] and logged[0][0] == "WARN"
+
+
+def test_real_detached_cli_lifecycle(home, ollama, monkeypatch):
+    import os
+    import socket
+    import subprocess
+    import sys
+    monkeypatch.setenv("IPX_OLLAMA_URL", ollama.url)
+    # APPDATA is isolated by home; preserve this interpreter's dependencies
+    # when Python computes a different Windows user-site path in the child.
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(p for p in sys.path if p))
+    ollama.route("GET", "/api/version", body={"version": "fixture"})
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    command = [sys.executable, "-m", "ipx", "--json", "server"]
+    def run(*args):
+        options = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+        result = subprocess.run(command + list(args), env=dict(os.environ), capture_output=True, text=True, timeout=25, **options)
+        diagnostics = ""
+        if result.returncode:
+            from ipx.config import config_dir
+            for name in ("server-process.log", "InferencePort-Server.log", "server.pid"):
+                path = config_dir() / name
+                if path.exists(): diagnostics += f"\n{name}:\n" + path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        assert result.returncode == 0, result.stderr + diagnostics
+        return json.loads(result.stdout)
+    try:
+        assert run("start", "--host", "127.0.0.1", "--port", str(port), "--generate-key", "--detach")["running"]
+        status = run("status")
+        assert status["running"] and status["healthy"] and status["port"] == port
+        assert run("stop")["stopped"]
+        assert not run("status")["running"]
+    finally:
+        run("stop")

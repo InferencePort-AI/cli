@@ -1,0 +1,38 @@
+name: Desktop server differential parity
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  parity:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: sharktide/inferenceport-ai
+          ref: f584e76fa74d0f4764a056d659accee2e1b7a517
+          path: .desktop-reference
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e ".[dev]"
+      - run: npm install --prefix .reference-tools --ignore-scripts typescript@5.9.3 systeminformation@5.33.15
+      - name: Compare real desktop implementation and client against Python
+        shell: python
+        run: |
+          import os, pathlib, sys, pytest
+          root = pathlib.Path.cwd()
+          sys.path.insert(0, str(root / 'tests'))
+          os.environ['IPX_DESKTOP_SOURCE'] = str(root / '.desktop-reference/src')
+          os.environ['IPX_TYPESCRIPT_PATH'] = str(root / '.reference-tools/node_modules/typescript')
+          os.environ['IPX_SYSTEMINFORMATION_PATH'] = str(root / '.reference-tools/node_modules/systeminformation')
+          raise SystemExit(pytest.main(['tests/test_server_parity.py', 'tests/test_hardware_native.py', '-q']))
