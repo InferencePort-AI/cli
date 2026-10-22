@@ -23,6 +23,9 @@ dependencies = [
   "click>=8.1,<9",
   "rich>=13.7",
   "certifi>=2024.2.2",
+  "cryptography>=43",
+  "psutil>=6",
+  "py-cpuinfo>=9",
 ]
 
 [project.optional-dependencies]

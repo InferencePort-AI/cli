@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -71,7 +72,7 @@ def healthy(d: Dict[str, Any]) -> bool:
     try:
         conn = http.client.HTTPConnection(host, int(d["port"]), timeout=1.5)
         conn.request("GET", "/__health")
-        ok_ = conn.getresponse().status == 204
+        ok_ = conn.getresponse().status in (204, 429)
         conn.close()
         return ok_
     except (OSError, ValueError, KeyError):
@@ -133,13 +134,29 @@ def parse_users(allow: List[str]) -> List[Dict[str, str]]:
     users = []
     for a in allow:
         email, _, role = a.partition(":")
-        email, role = email.strip().lower(), (role.strip().lower() or "member")
+        email, role = email.strip(), (role.strip().lower() or "member")
         if "@" not in email:
             raise IpxError(f"“{a}” is not an email address.", "Use --allow user@example.com or user@example.com:admin")
         if role not in ("admin", "member"):
             raise IpxError(f"Unknown role “{role}” for {email}.", "Roles are admin and member.")
         users.append({"email": email, "role": role})
     return users
+
+
+def monitor_host_policy(app, srv, users, keys, stopped):
+    """Revoke an active listener on the desktop's five-minute policy cadence."""
+    while not stopped.wait(5 * 60):
+        try:
+            settings = policy.host_settings(app)
+            if settings["managed"] and settings["access"] != "manual":
+                allowed = {u["email"]: "admin" if u.get("role") in ("owner", "admin") else u.get("role", "member")
+                           for u in settings["users"]}
+                if keys or any(allowed.get(u["email"]) != u["role"] for u in users):
+                    raise IpxError("Organization server membership changed.")
+        except IpxError as err:
+            srv.log.line("WARN", f"Hosting revoked: {err.message}")
+            srv.shutdown()
+            return
 
 
 # --------------------------------------------------------------------------- commands
@@ -177,11 +194,15 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
     settings = policy.host_settings(app)  # raises if the organization forbids hosting
     users = parse_users(list(allow))
     if settings["managed"] and settings["access"] != "manual":
-        merged = {u["email"]: u for u in users}
+        merged = {}
         for u in settings["users"]:
             merged[u["email"].lower()] = {"email": u["email"].lower(), "role": "admin" if u.get("role") in ("owner", "admin") else (u.get("role") or "member")}
         users = list(merged.values())
     keys = list(api_keys) + [k for k in os.environ.get("IPX_SERVER_KEYS", "").split(",") if k]
+    if settings["managed"] and settings["access"] != "manual":
+        keys = []
+        if generate_key:
+            raise IpxError("Shared server API keys are disabled by organization membership access.")
     new_key = None
     if generate_key:
         new_key = "ipxs_" + secrets.token_urlsafe(24)
@@ -197,13 +218,16 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
         args = self_command() + ["--org", app.org] * bool(app.org) + ["--personal"] * bool(app.personal) + ["server", "start", "--port", str(port), "--host", host]
         for u in users:
             args += ["--allow", f"{u['email']}:{u['role']}"]
-        log = open(log_path(), "ab")
+        log = open(config_dir() / "server-process.log", "ab")
         kw: Dict[str, Any] = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env)
         if sys.platform == "win32":
             kw["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED | NEW_GROUP | NO_WINDOW
         else:
             kw["start_new_session"] = True
-        proc = subprocess.Popen(args, **kw)
+        try:
+            proc = subprocess.Popen(args, **kw)
+        finally:
+            log.close()
         for _ in range(60):
             time.sleep(0.25)
             if proc.poll() is not None:
@@ -217,8 +241,11 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
 
     srv = ProxyServer(host=host, port=port, ollama_url=app.cfg.ollama_url, users=users, api_keys=keys,
                       verifier=Verifier(app.cfg, app.creds) if users else None, echo=verbose)
+    stopped = threading.Event()
+
     def advertise() -> None:  # only once the port is bound, so a pid file always means "listening"
         pid_path().write_text(json.dumps({"pid": os.getpid(), "port": port, "host": host, "started": time.time(), "org": app.org}), encoding="utf-8")
+        threading.Thread(target=monitor_host_policy, args=(app, srv, users, keys, stopped), daemon=True).start()
 
     try:
         if not os.environ.get("IPX_DETACHED"):
@@ -229,6 +256,7 @@ def start(app: App, port: int, host: str, allow, api_keys, generate_key: bool, d
     except KeyboardInterrupt:
         ui.console.print("\n[muted]Stopping server…[/muted]")
     finally:
+        stopped.set()
         try:
             pid_path().unlink()
         except OSError:
@@ -305,19 +333,30 @@ def logs(lines: int, follow: bool) -> None:
         ui.info("No log yet. Start the server first.")
         return
     with open(p, "r", encoding="utf-8", errors="replace") as fh:
-        tail = fh.readlines()[-lines:]
-        for ln in tail:
+        for ln in fh.readlines()[-lines:]:
             _print_log(ln.rstrip("\n"))
-        if follow:
-            try:
-                while True:
-                    ln = fh.readline()
-                    if ln:
-                        _print_log(ln.rstrip("\n"))
-                    else:
-                        time.sleep(0.4)
-            except KeyboardInterrupt:
-                pass
+        offset = fh.tell()
+        identity = p.stat().st_ino
+    if follow:
+        try:
+            while True:
+                try:
+                    stat = p.stat()
+                    if stat.st_ino != identity or stat.st_size < offset:
+                        offset = 0
+                    identity = stat.st_ino
+                    # Reopen each poll: an open Windows reader prevents rename.
+                    with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                        fh.seek(offset)
+                        for ln in fh:
+                            _print_log(ln.rstrip("\n"))
+                        offset = fh.tell()
+                except FileNotFoundError:
+                    pass
+                time.sleep(0.4)
+        except KeyboardInterrupt:
+            pass
+
 
 
 def _print_log(line: str) -> None:

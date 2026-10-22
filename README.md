@@ -148,3 +148,38 @@ context. Provider keys stay on the server. Responses include answers, input toke
 and credits charged. Use `--model` to override a request file's model. Additional
 System One providers and retail prices are configured by the backend operator in
 `src/models/decision.json`.
+
+## Hosting protocol and encrypted desktop clients
+
+`ipx server start` supports the desktop P-256 / AES-256-GCM request-body protocol,
+including `GET /__inferenceport/crypto-capabilities`,
+`POST /__inferenceport/crypto-handshake`, one-hour sessions, and `POST /sysinfo`
+hardware ratings. The Python server needs no Node.js or Electron installation.
+Dependencies include cryptography, psutil and py-cpuinfo; GPU inspection uses
+platform tools and optionally nvidia-smi. CPU inspection is cached; available
+RAM is refreshed per rating. Unknown measurements are reported as unknown.
+
+Use `--allow EMAIL[:admin|member]` for service-verified access tokens and
+`--api-key` or `--generate-key` for shared server keys. Email matching preserves
+case. A shared key uses the first configured admin, otherwise the first user,
+otherwise an admin identity when no users exist. Member restrictions follow the
+desktop's raw-URL regex; they are not a general read-only guarantee. Managed
+organization membership modes disable shared keys.
+
+Health, authenticated proxy traffic and sysinfo share 30 accepted requests per
+IP per fixed minute. Handshakes and capability probes do not consume that quota;
+verification-service quotas still apply. Bodies are buffered with a 20 MiB limit.
+Ollama response bodies stream through without an inference timeout. Logs are
+`InferencePort-Server.log`, rotated at 10 MiB, and truncated on server startup;
+`ipx server logs -f` follows rotation. Detached process diagnostics go to
+`server-process.log` beside the server log.
+
+Encryption covers request bodies only. Bearer tokens and responses require HTTPS
+for transport confidentiality. Sessions re-verify the token on every request,
+but the desktop protocol has no replay counter. Limit exposure to trusted
+networks or place HTTPS in front of the server. Avoid secrets in query strings,
+which appear in connection logs.
+
+See [the protocol audit, endpoint matrix, validation and remaining gaps](docs/server-parity.md).
+Exact parity is **not yet certified**; that document records explicit security
+deviations and outstanding platform/HTTP-parser validation.
