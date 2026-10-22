@@ -474,9 +474,18 @@ def test_live_native_collectors_against_systeminformation(reference_env):
     assert actual["cpu"] == expected["cpu"]
     assert actual["flags"] == expected["flags"]
     assert actual["mem"]["total"] == expected["mem"]["total"]
-    # Both are real sequential OS samples; available memory can move while the
-    # profiler/driver query runs. Only that time-varying measurement has tolerance.
-    assert abs(actual["mem"]["available"] - expected["mem"]["available"]) <= max(512 * 1024**2, expected["mem"]["total"] * .05)
+    # Do not compare memory sampled concurrently with system_profiler to a
+    # later idle sample: the profiler itself can consume hundreds of MiB.
+    # Bracket an isolated SI memory query with native samples. This retains
+    # actual observed drift bounds rather than increasing a blanket tolerance.
+    from ipx.hardware_native import memory_snapshot
+    before = memory_snapshot()
+    reference_memory = run_reference("native-memory", reference_env)
+    after = memory_snapshot()
+    assert before["total"] == reference_memory["total"] == after["total"]
+    jitter = 128 * 1024**2  # Node startup + command sampling between the probes
+    low, high = sorted((before["available"], after["available"]))
+    assert low - jitter <= reference_memory["available"] <= high + jitter, (before, reference_memory, after)
     if os.sys.platform in ("win32", "darwin"):
         assert {row["model"] for row in expected["controllers"]} <= {row["model"] for row in actual["controllers"]}
     for row in actual["controllers"]:

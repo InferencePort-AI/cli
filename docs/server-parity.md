@@ -228,3 +228,10 @@ hardened rejection and separately enforces trailer limits. Local tests can selec
 the same isolated reference binary with IPX_REFERENCE_NODE. This changes no
 desktop application source. Tests against older runtimes may correctly expose
 this security-driven compatibility difference rather than silently masking it.
+
+
+Live memory validation brackets an isolated systeminformation memory query with
+native samples. It does not compare a sample taken while system_profiler is
+allocating hundreds of MiB to a later idle sample. The reference must lie within
+the observed native before/after range plus a 128 MiB command-startup margin;
+static totals and deterministic OS accounting fixtures still compare exactly.

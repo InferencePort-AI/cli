@@ -69,7 +69,11 @@ function load(file) {
 }
 (async () => {
   const helper = path.join(root, 'node-apis/helper');
-  if (mode === 'native') {
+  if (mode === 'native-memory') {
+    const native = process.env.IPX_SYSTEMINFORMATION_PATH ? require(process.env.IPX_SYSTEMINFORMATION_PATH) : desktopRequire('systeminformation');
+    const mem = await native.mem();
+    console.log('RESULT ' + JSON.stringify({total:mem.total,available:mem.available}));
+  } else if (mode === 'native') {
     const native = process.env.IPX_SYSTEMINFORMATION_PATH ? require(process.env.IPX_SYSTEMINFORMATION_PATH) : desktopRequire('systeminformation');
     const [cpu, flags, mem, graphics] = await Promise.all([native.cpu(), native.cpuFlags(), native.mem(), native.graphics()]);
     console.log('RESULT ' + JSON.stringify({cpu:{brand:cpu.brand,cores:cpu.cores,cache:{l3:cpu.cache.l3 || 0}}, flags,
