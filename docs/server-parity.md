@@ -194,7 +194,7 @@ resolution, including percent-encoded dot segments. No Node/Electron runtime is
 required. The transport implements first-value singleton headers (including
 Authorization), joined duplicate custom headers/cookies, CL/TE rejection, chunk
 validation, CONNECT/upgrade handling, HTTP/1.0 framing, required Host, unread-body
-draining, parser error responses, 16 KiB header limits and the 1000-field (2000 raw name/value pairs) limit.
+draining, parser error responses, 16 KiB header limits and the 1000-field (2000 raw name/value pairs) overflow rejection.
 Node defaults are reproduced: 60-second header receipt, 300-second total request
 receipt, 30-second deadline scans, and 5-second keep-alive plus the 1-second socket
 buffer. Completed request bodies clear receipt deadlines, so long inference is
@@ -216,3 +216,15 @@ process/server diagnostics on startup failure. macOS tests remain enabled.
 
 Local follow-up server/hardware suite: 150 passed. Updated CI results are tracked
 on the pull request; they are not claimed before completion.
+
+
+### Reference runtime pin
+
+Differential CI pins Node 24.21.0. Its security hardening rejects requests over
+1000 header fields with 431; Node 24.11 silently discarded excess fields instead.
+Using a floating Node 24 selector had selected different cached minor versions
+on different runner OSes, exposing this runtime difference. Python uses the
+hardened rejection and separately enforces trailer limits. Local tests can select
+the same isolated reference binary with IPX_REFERENCE_NODE. This changes no
+desktop application source. Tests against older runtimes may correctly expose
+this security-driven compatibility difference rather than silently masking it.

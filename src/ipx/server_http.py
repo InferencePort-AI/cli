@@ -42,7 +42,7 @@ class Headers:
 
     def __init__(self, pairs, maximum=1000):
         self.data = {}
-        for key, value in pairs[:maximum]:
+        for key, value in pairs[:maximum] if maximum > 0 else pairs:
             key = key.lower()
             if key not in self.data:
                 self.data[key] = value
@@ -121,13 +121,21 @@ class Request(socketserver.StreamRequestHandler):
         if self.header_size >= self.settings.max_header_size: raise ProtocolError(431)
 
     def on_header(self, key, value):
-        if self.headers_complete: return  # trailers are separate, never request headers
+        if self.headers_complete:
+            self.trailer_size += len(key) + len(value)
+            self.trailer_count += 1
+            if self.trailer_size >= self.settings.max_header_size or self.settings.max_headers_count > 0 and self.trailer_count > self.settings.max_headers_count:
+                raise ProtocolError(431)
+            return  # trailers are separate, never request headers
+        if self.settings.max_headers_count > 0 and len(self.pairs) >= self.settings.max_headers_count:
+            raise ProtocolError(431)
         self.header_size += len(key) + len(value)
         if self.header_size >= self.settings.max_header_size: raise ProtocolError(431)
         self.pairs.append((key.decode("latin-1"), value.decode("latin-1")))
 
     def on_headers_complete(self):
         self.headers_complete = True
+        self.trailer_size, self.trailer_count = 0, 0
         self.command = self.parser.get_method().decode("ascii")
         self.request_version = "HTTP/" + self.parser.get_http_version()
         self.path = self.url.decode("latin-1")
@@ -226,7 +234,11 @@ class Request(socketserver.StreamRequestHandler):
                 pending_line = bytearray()
                 first_line = True
                 while not self.headers_complete:
-                    line = self.rfile.readline(1024)
+                    available = self.rfile.peek(1)
+                    if not available: return
+                    newline = available.find(b"\n")
+                    size = min(1024, newline + 1 if newline >= 0 else len(available))
+                    line = self.rfile.read(size)
                     pending_line.extend(line)
                     if not line: return
                     if self.idle:
@@ -236,6 +248,8 @@ class Request(socketserver.StreamRequestHandler):
                         self.expires = self.request_started + timeout if timeout else None
                     self.feed(line)
                     if not self.headers_complete and not first_line:
+                        if pending_line.strip() and self.settings.max_headers_count > 0 and len(self.pairs) >= self.settings.max_headers_count:
+                            raise ProtocolError(431)
                         key, sep, value = bytes(pending_line).partition(b":")
                         size = len(key) + len(value.strip(b" \t\r\n")) if sep else len(pending_line)
                         if self.header_size + size >= self.settings.max_header_size:

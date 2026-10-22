@@ -29,6 +29,7 @@ SNAPSHOT = {"cpu": {"brand": "Fixture CPU", "cores": 8, "cache": {"l3": 0}}, "fl
             "mem": {"total": 32 * 1024**3, "available": 20 * 1024**3}, "controllers": [], "backend": "unknown"}
 ROOT = Path(os.environ.get("IPX_DESKTOP_SOURCE", Path(__file__).parents[2] / "inferenceport-ai" / "src"))
 LOADER = Path(__file__).with_name("desktop_reference.cjs")
+REFERENCE_NODE = os.environ.get("IPX_REFERENCE_NODE", "node")
 
 
 def verification(token):
@@ -97,7 +98,7 @@ def reference_env(home, fake, ollama, tmp_path, request):
 
 @pytest.fixture
 def reference(reference_env):
-    proc = subprocess.Popen(["node", str(LOADER), str(ROOT)], env=reference_env,
+    proc = subprocess.Popen([REFERENCE_NODE, str(LOADER), str(ROOT)], env=reference_env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lines = queue.Queue()
     def read():
@@ -222,7 +223,7 @@ def test_rate_and_session_exact_boundaries(monkeypatch):
 
 
 def run_reference(mode, env):
-    output = subprocess.check_output(["node", str(LOADER), str(ROOT), mode], env=env, text=True, encoding="utf-8", timeout=40)
+    output = subprocess.check_output([REFERENCE_NODE, str(LOADER), str(ROOT), mode], env=env, text=True, encoding="utf-8", timeout=40)
     return json.loads(next(line[7:] for line in output.splitlines() if line.startswith("RESULT ")))
 
 
@@ -524,9 +525,10 @@ def test_oversized_header_before_line_termination(reference, python_host):
     assert raw_exchange(server.httpd.server_port, wire) == expected
 
 
-def test_header_count_limit(reference, python_host, ollama):
+@pytest.mark.parametrize("extra", [995, 996, 997, 998, 2000])
+def test_header_count_limit(reference, python_host, ollama, extra):
     ollama.route("GET", "/api/tags", lambda rec: (200, {}, {"x_end": rec["headers"].get("x-end"), "x": rec["headers"].get("x")}))
-    wire = b"GET /api/tags HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer key\r\nConnection: close\r\n" + b"X:\r\n" * 2000 + b"X-End: excluded\r\n\r\n"
+    wire = b"GET /api/tags HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer key\r\nConnection: close\r\n" + b"X:\r\n" * extra + b"X-End: excluded\r\n\r\n"
     server = python_host()
     assert raw_exchange(server.httpd.server_port, wire) == raw_exchange(reference, wire)
 
@@ -543,3 +545,12 @@ def test_keepalive_idle_buffer(reference, reference_env, python_host):
         response.read()
         assert conn.sock.recv(1) == b""
         conn.close()
+
+
+def test_excess_header_name_rejected_before_colon(reference, python_host):
+    # Host + Authorization + Connection + 997 X fields exhaust 1000 slots.
+    wire = b"GET /api/tags HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer key\r\nConnection: close\r\n" + b"X:\r\n" * 997 + b"Q"
+    server = python_host()
+    expected = raw_exchange(reference, wire)
+    assert expected[0] == b"HTTP/1.1 431 Request Header Fields Too Large"
+    assert raw_exchange(server.httpd.server_port, wire) == expected
