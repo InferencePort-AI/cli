@@ -474,18 +474,39 @@ def test_live_native_collectors_against_systeminformation(reference_env):
     assert actual["cpu"] == expected["cpu"]
     assert actual["flags"] == expected["flags"]
     assert actual["mem"]["total"] == expected["mem"]["total"]
-    # Do not compare memory sampled concurrently with system_profiler to a
-    # later idle sample: the profiler itself can consume hundreds of MiB.
-    # Bracket an isolated SI memory query with native samples. This retains
-    # actual observed drift bounds rather than increasing a blanket tolerance.
+    # Keep the observer resident for all three samples: comparing to a query
+    # taken in a process that has already exited includes its memory footprint.
+    # No compiler/profiler is loaded by this isolated memory-only observer.
     from ipx.hardware_native import memory_snapshot
-    before = memory_snapshot()
-    reference_memory = run_reference("native-memory", reference_env)
-    after = memory_snapshot()
-    assert before["total"] == reference_memory["total"] == after["total"]
-    jitter = 128 * 1024**2  # Node startup + command sampling between the probes
-    low, high = sorted((before["available"], after["available"]))
-    assert low - jitter <= reference_memory["available"] <= high + jitter, (before, reference_memory, after)
+    proc = subprocess.Popen([REFERENCE_NODE, str(LOADER), str(ROOT), "native-memory-service"],
+                            env=reference_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+    lines = queue.Queue()
+    def reader():
+        for line in proc.stdout: lines.put(line)
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    try:
+        assert lines.get(timeout=15).startswith("READY memory")
+        before = memory_snapshot()
+        proc.stdin.write("sample\n")
+        proc.stdin.flush()
+        line = lines.get(timeout=15)
+        assert line.startswith("RESULT "), line
+        reference_memory = json.loads(line[7:])
+        after = memory_snapshot()
+        assert before["total"] == reference_memory["total"] == after["total"]
+        jitter = 64 * 1024**2  # native command scheduling, not observer startup
+        low, high = sorted((before["available"], after["available"]))
+        assert low - jitter <= reference_memory["available"] <= high + jitter, (before, reference_memory, after)
+    finally:
+        proc.stdin.close()
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        thread.join(5)
+        proc.stdout.close()
     if os.sys.platform in ("win32", "darwin"):
         assert {row["model"] for row in expected["controllers"]} <= {row["model"] for row in actual["controllers"]}
     for row in actual["controllers"]:

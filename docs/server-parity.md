@@ -231,7 +231,9 @@ this security-driven compatibility difference rather than silently masking it.
 
 
 Live memory validation brackets an isolated systeminformation memory query with
-native samples. It does not compare a sample taken while system_profiler is
-allocating hundreds of MiB to a later idle sample. The reference must lie within
-the observed native before/after range plus a 128 MiB command-startup margin;
-static totals and deterministic OS accounting fixtures still compare exactly.
+native samples while the same Node observer remains resident throughout. Native
+probes do not load the test-only TypeScript compiler or system_profiler. This
+removes the observer process startup/exit footprint from the comparison. The
+reference must lie within the observed native before/after range plus a 64 MiB
+command-scheduling margin; static totals and OS accounting fixtures still compare
+exactly. Native measurements and application rating behavior are not changed.

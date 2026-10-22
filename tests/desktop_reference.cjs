@@ -8,7 +8,7 @@ const {EventEmitter} = require('node:events');
 const root = path.resolve(process.argv[2]);
 const mode = process.argv[3] || 'server';
 const desktopRequire = createRequire(path.join(root, 'package.json'));
-const ts = process.env.IPX_TYPESCRIPT_PATH ? require(process.env.IPX_TYPESCRIPT_PATH) : desktopRequire('typescript');
+const ts = mode.startsWith('native') ? null : process.env.IPX_TYPESCRIPT_PATH ? require(process.env.IPX_TYPESCRIPT_PATH) : desktopRequire('typescript');
 const http = require('node:http');
 const cache = new Map();
 const realNow = Date.now;
@@ -69,7 +69,15 @@ function load(file) {
 }
 (async () => {
   const helper = path.join(root, 'node-apis/helper');
-  if (mode === 'native-memory') {
+  if (mode === 'native-memory-service') {
+    const native = process.env.IPX_SYSTEMINFORMATION_PATH ? require(process.env.IPX_SYSTEMINFORMATION_PATH) : desktopRequire('systeminformation');
+    const lines = require('node:readline').createInterface({input:process.stdin});
+    lines.on('line', async () => {
+      const mem = await native.mem();
+      console.log('RESULT ' + JSON.stringify({total:mem.total,available:mem.available}));
+    });
+    console.log('READY memory');
+  } else if (mode === 'native-memory') {
     const native = process.env.IPX_SYSTEMINFORMATION_PATH ? require(process.env.IPX_SYSTEMINFORMATION_PATH) : desktopRequire('systeminformation');
     const mem = await native.mem();
     console.log('RESULT ' + JSON.stringify({total:mem.total,available:mem.available}));
