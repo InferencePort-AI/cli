@@ -15,9 +15,6 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from rich.console import Group
-from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
@@ -54,46 +51,48 @@ class Totals:
 
 def _stream_turn(backend: Backend, messages: List[Dict[str, Any]], model: Optional[str], totals: Totals,
                  live_render: bool = True) -> Tuple[str, Dict[str, Any]]:
-    """Run one assistant turn, rendering Markdown live. Returns (text, info)."""
-    text, think = "", ""
+    """Run one assistant turn, appending output without redrawing terminal history."""
+    text = ""
+    last_kind, last_output = "", ""
     info: Dict[str, Any] = {}
     start = time.time()
-    first = None
-
-    def view() -> Group:
-        parts: List[Any] = []
-        if think:
-            tail = think.strip().splitlines()[-3:]
-            parts.append(Text("💭 " + " ".join(tail)[:300], style="dim italic"))
-        if text:
-            parts.append(Markdown(text, code_theme="monokai"))
-        elif not think:
-            parts.append(Text("●●●", style=ui.BRAND))
-        return Group(*parts)
-
     stream = backend(messages, model)
     try:
-        with Live(view(), console=ui.console, refresh_per_second=14, transient=False, vertical_overflow="visible") as live:
+        with ui.status("Thinking…") as status:
             try:
                 for kind, payload in stream:
-                    if kind == "text":
-                        first = first or time.time()
-                        text += payload
-                    elif kind == "think":
-                        think += payload
+                    if kind in ("text", "think"):
+                        if not payload:
+                            continue
+                        if status:
+                            status.stop()
+                        if last_kind and kind != last_kind and not last_output.endswith("\n"):
+                            ui.console.print()
+                        # Append literal deltas; the terminal owns wrapping and scrollback.
+                        style = "dim italic" if kind == "think" else ""
+                        ui.console.print(Text(payload, style=style), end="", soft_wrap=True)
+                        last_kind, last_output = kind, payload
+                        if kind == "text":
+                            text += payload
                     elif kind == "meta":
                         info.update(payload)
                     elif kind == "usage":
                         info.update(payload)
                         totals.add(payload)
-                    live.update(view())
             except KeyboardInterrupt:
                 info["interrupted"] = True
-            live.update(Group(Markdown(text, code_theme="monokai")) if text else Text(""))
+            except IpxError as e:
+                if not text:
+                    raise
+                info["error"] = e
     finally:
-        close = getattr(stream, "close", None)
-        if close:
-            close()
+        try:
+            if last_output and not last_output.endswith("\n"):
+                ui.console.print()
+        finally:
+            close = getattr(stream, "close", None)
+            if close:
+                close()
     info["elapsed"] = time.time() - start
     return text, info
 
@@ -235,6 +234,8 @@ def _answer(backend: Backend, messages: List[Dict[str, Any]], model: Optional[st
     if text or info.get("interrupted"):
         messages.append({"role": "assistant", "content": text})
         totals.turns += 1
+    if info.get("error"):
+        ui.render_error(info["error"])
     _footer(info, model)
     ui.console.print()
     return True
