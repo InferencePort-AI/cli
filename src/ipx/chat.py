@@ -53,6 +53,7 @@ def _stream_turn(backend: Backend, messages: List[Dict[str, Any]], model: Option
                  live_render: bool = True) -> Tuple[str, Dict[str, Any]]:
     """Run one assistant turn, appending output without redrawing terminal history."""
     text = ""
+    last_kind, last_output = "", ""
     info: Dict[str, Any] = {}
     start = time.time()
     stream = backend(messages, model)
@@ -60,15 +61,19 @@ def _stream_turn(backend: Backend, messages: List[Dict[str, Any]], model: Option
         with ui.status("Thinking…") as status:
             try:
                 for kind, payload in stream:
-                    if kind == "text":
+                    if kind in ("text", "think"):
                         if not payload:
                             continue
                         if status:
                             status.stop()
-                        text += payload
-                        # Literal, unwrapped deltas preserve code indentation and let the
-                        # terminal own wrapping / scrollback. Never replay the full answer.
-                        ui.console.print(Text(payload), end="", soft_wrap=True)
+                        if last_kind and kind != last_kind and not last_output.endswith("\n"):
+                            ui.console.print()
+                        # Append literal deltas; the terminal owns wrapping and scrollback.
+                        style = "dim italic" if kind == "think" else ""
+                        ui.console.print(Text(payload, style=style), end="", soft_wrap=True)
+                        last_kind, last_output = kind, payload
+                        if kind == "text":
+                            text += payload
                     elif kind == "meta":
                         info.update(payload)
                     elif kind == "usage":
@@ -76,12 +81,18 @@ def _stream_turn(backend: Backend, messages: List[Dict[str, Any]], model: Option
                         totals.add(payload)
             except KeyboardInterrupt:
                 info["interrupted"] = True
+            except IpxError as e:
+                if not text:
+                    raise
+                info["error"] = e
     finally:
-        if text and not text.endswith("\n"):
-            ui.console.print()
-        close = getattr(stream, "close", None)
-        if close:
-            close()
+        try:
+            if last_output and not last_output.endswith("\n"):
+                ui.console.print()
+        finally:
+            close = getattr(stream, "close", None)
+            if close:
+                close()
     info["elapsed"] = time.time() - start
     return text, info
 
@@ -223,6 +234,8 @@ def _answer(backend: Backend, messages: List[Dict[str, Any]], model: Optional[st
     if text or info.get("interrupted"):
         messages.append({"role": "assistant", "content": text})
         totals.turns += 1
+    if info.get("error"):
+        ui.render_error(info["error"])
     _footer(info, model)
     ui.console.print()
     return True

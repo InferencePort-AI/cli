@@ -104,29 +104,26 @@ def test_long_code_stream_is_append_only(monkeypatch, width, height):
     monkeypatch.setattr(ui, "console", console)
     chunks = ["```python\n"] + [f"    print('[bold]line {n}[/bold]')\n" for n in range(60)] + ["```"]
     expected = "".join(chunks)
-    closed = []
 
     def backend(messages, model):
-        try:
-            yield "think", "Planning the code"
-            for index, chunk in enumerate(chunks):
-                yield "text", chunk
-                # Inspect while the backend is still generating, not just the final frame.
-                written = output.getvalue()
-                start = written.index("```python")
-                assert written[start:] == "".join(chunks[:index + 1])
-            yield "usage", {"tokens": 100, "credits": 0.5}
-        finally:
-            closed.append(True)
+        yield "think", "Planning the code"
+        for index, chunk in enumerate(chunks):
+            yield "text", chunk
+            # Inspect while the backend is still generating, not just the final frame.
+            written = output.getvalue()
+            start = written.index("```python")
+            assert written[start:] == "".join(chunks[:index + 1])
+        yield "usage", {"tokens": 100, "credits": 0.5}
 
+    stream = ClosingStream(backend([], None))
     totals = chat.Totals()
-    text, info = chat._stream_turn(backend, [], None, totals)
+    text, info = chat._stream_turn(lambda *_: stream, [], None, totals)
     written = output.getvalue()
     assert written[written.index("```python"):] == expected + "\n"
     assert text == expected
     assert totals.tokens == info["tokens"] == 100
     assert totals.credits == 0.5
-    assert closed == [True]
+    assert stream.close_calls == 1
 
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt, IpxError])
@@ -137,20 +134,93 @@ def test_stream_failure_preserves_partial_output_and_closes(monkeypatch, failure
 
     output = StringIO()
     monkeypatch.setattr(ui, "console", Console(file=output))
-    closed = []
 
     def backend(messages, model):
-        try:
-            yield "text", "partial code"
-            raise failure("stopped")
-        finally:
-            closed.append(True)
+        yield "text", "partial code"
+        raise failure("stopped")
 
+    stream = ClosingStream(backend([], None))
+    text, info = chat._stream_turn(lambda *_: stream, [], None, chat.Totals())
+    assert text == "partial code"
     if failure is KeyboardInterrupt:
-        text, info = chat._stream_turn(backend, [], None, chat.Totals())
-        assert text == "partial code" and info["interrupted"]
+        assert info["interrupted"]
     else:
-        with pytest.raises(IpxError):
-            chat._stream_turn(backend, [], None, chat.Totals())
+        assert isinstance(info["error"], IpxError)
     assert output.getvalue() == "partial code\n"
-    assert closed == [True]
+    assert stream.close_calls == 1
+
+
+class ClosingStream:
+    """Observe explicit close calls independently of generator exhaustion."""
+
+    def __init__(self, events):
+        self.events = iter(events)
+        self.close_calls = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self.events)
+
+    def close(self):
+        self.close_calls += 1
+        close = getattr(self.events, "close", None)
+        if close:
+            close()
+
+
+@pytest.mark.parametrize("events,expected", [
+    ([("think", "plan"), ("think", "ning"), ("text", "answer")], "planning\nanswer\n"),
+    ([("think", "planning\n")], "planning\n"),
+    ([("think", "planning")], "planning\n"),
+])
+def test_reasoning_streams_dimmed_without_entering_reply(monkeypatch, events, expected):
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    console = Console(file=output, record=True)
+    monkeypatch.setattr(ui, "console", console)
+    stream = ClosingStream(events)
+    text, _ = chat._stream_turn(lambda *_: stream, [], None, chat.Totals())
+    assert output.getvalue() == expected
+    assert text == "".join(payload for kind, payload in events if kind == "text")
+    assert any(segment.style and segment.style.dim for segment in console._record_buffer if "plan" in segment.text)
+    assert stream.close_calls == 1
+
+
+def test_newline_failure_still_closes_stream(monkeypatch):
+    from contextlib import nullcontext
+    from unittest.mock import Mock
+
+    console = Mock()
+    console.print.side_effect = [None, BrokenPipeError("closed output")]
+    monkeypatch.setattr(ui, "console", console)
+    monkeypatch.setattr(ui, "status", lambda *_: nullcontext(None))
+    stream = ClosingStream([("text", "partial")])
+    with pytest.raises(BrokenPipeError):
+        chat._stream_turn(lambda *_: stream, [], None, chat.Totals())
+    assert stream.close_calls == 1
+
+
+def test_partial_reply_is_retained_in_next_request(tty, monkeypatch, capsys):
+    seen = []
+
+    def backend(messages, model):
+        seen.append(list(messages))
+        yield "text", "partial reply"
+        if len(seen) == 1:
+            raise IpxError("connection lost")
+
+    script(monkeypatch, ["first", "continue", "/usage", "/exit"])
+    chat.run_repl(title="T", subtitle="s", backend=backend, model=None)
+    assert seen[1] == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "partial reply"},
+        {"role": "user", "content": "continue"},
+    ]
+    captured = capsys.readouterr()
+    assert "connection lost" in captured.err
+    assert "2 turns" in captured.out
