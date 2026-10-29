@@ -15,9 +15,6 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from rich.console import Group
-from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
@@ -54,43 +51,34 @@ class Totals:
 
 def _stream_turn(backend: Backend, messages: List[Dict[str, Any]], model: Optional[str], totals: Totals,
                  live_render: bool = True) -> Tuple[str, Dict[str, Any]]:
-    """Run one assistant turn, rendering Markdown live. Returns (text, info)."""
-    text, think = "", ""
+    """Run one assistant turn, appending output without redrawing terminal history."""
+    text = ""
     info: Dict[str, Any] = {}
     start = time.time()
-    first = None
-
-    def view() -> Group:
-        parts: List[Any] = []
-        if think:
-            tail = think.strip().splitlines()[-3:]
-            parts.append(Text("💭 " + " ".join(tail)[:300], style="dim italic"))
-        if text:
-            parts.append(Markdown(text, code_theme="monokai"))
-        elif not think:
-            parts.append(Text("●●●", style=ui.BRAND))
-        return Group(*parts)
-
     stream = backend(messages, model)
     try:
-        with Live(view(), console=ui.console, refresh_per_second=14, transient=False, vertical_overflow="visible") as live:
+        with ui.status("Thinking…") as status:
             try:
                 for kind, payload in stream:
                     if kind == "text":
-                        first = first or time.time()
+                        if not payload:
+                            continue
+                        if status:
+                            status.stop()
                         text += payload
-                    elif kind == "think":
-                        think += payload
+                        # Literal, unwrapped deltas preserve code indentation and let the
+                        # terminal own wrapping / scrollback. Never replay the full answer.
+                        ui.console.print(Text(payload), end="", soft_wrap=True)
                     elif kind == "meta":
                         info.update(payload)
                     elif kind == "usage":
                         info.update(payload)
                         totals.add(payload)
-                    live.update(view())
             except KeyboardInterrupt:
                 info["interrupted"] = True
-            live.update(Group(Markdown(text, code_theme="monokai")) if text else Text(""))
     finally:
+        if text and not text.endswith("\n"):
+            ui.console.print()
         close = getattr(stream, "close", None)
         if close:
             close()

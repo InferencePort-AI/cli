@@ -91,3 +91,66 @@ def test_one_shot_json(capsys):
     import json
     out = json.loads(capsys.readouterr().out)
     assert out["text"] == "echo: ping" and out["model"] == "Test Model" and out["usage"]["tokens"] == 7
+
+
+@pytest.mark.parametrize("width,height", [(80, 24), (20, 4)])
+def test_long_code_stream_is_append_only(monkeypatch, width, height):
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, width=width, height=height, color_system=None)
+    monkeypatch.setattr(ui, "console", console)
+    chunks = ["```python\n"] + [f"    print('[bold]line {n}[/bold]')\n" for n in range(60)] + ["```"]
+    expected = "".join(chunks)
+    closed = []
+
+    def backend(messages, model):
+        try:
+            yield "think", "Planning the code"
+            for index, chunk in enumerate(chunks):
+                yield "text", chunk
+                # Inspect while the backend is still generating, not just the final frame.
+                written = output.getvalue()
+                start = written.index("```python")
+                assert written[start:] == "".join(chunks[:index + 1])
+            yield "usage", {"tokens": 100, "credits": 0.5}
+        finally:
+            closed.append(True)
+
+    totals = chat.Totals()
+    text, info = chat._stream_turn(backend, [], None, totals)
+    written = output.getvalue()
+    assert written[written.index("```python"):] == expected + "\n"
+    assert text == expected
+    assert totals.tokens == info["tokens"] == 100
+    assert totals.credits == 0.5
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, IpxError])
+def test_stream_failure_preserves_partial_output_and_closes(monkeypatch, failure):
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    monkeypatch.setattr(ui, "console", Console(file=output))
+    closed = []
+
+    def backend(messages, model):
+        try:
+            yield "text", "partial code"
+            raise failure("stopped")
+        finally:
+            closed.append(True)
+
+    if failure is KeyboardInterrupt:
+        text, info = chat._stream_turn(backend, [], None, chat.Totals())
+        assert text == "partial code" and info["interrupted"]
+    else:
+        with pytest.raises(IpxError):
+            chat._stream_turn(backend, [], None, chat.Totals())
+    assert output.getvalue() == "partial code\n"
+    assert closed == [True]
