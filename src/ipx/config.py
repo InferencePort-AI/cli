@@ -4,7 +4,7 @@ Layout (per user):
   <config dir>/config.json       preferences: base URL, org context, client id, Supabase config cache
   <config dir>/credentials.json  tokens (mode 0600 on POSIX)
   <config dir>/server.pid        PID file for `ipx server start --detach`
-  <config dir>/server.log        proxy server log
+  <config dir>/InferencePort-Server.log  proxy server log
   <config dir>/policy-cache.json cached organization desktop policy
 
 Environment overrides: IPX_HOME, IPX_BASE_URL, IPX_TOKEN, IPX_API_KEY, IPX_ORG, IPX_OLLAMA_URL.

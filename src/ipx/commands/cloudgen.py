@@ -68,7 +68,7 @@ def build_group(tier: Tier) -> click.Group:
     @click.option("--system", help="System prompt.")
     @pass_app
     def chat_(app: App, model: Optional[str], system: Optional[str]) -> None:
-        """Interactive chat in your terminal with streaming Markdown."""
+        """Interactive chat in your terminal with scrollable streaming text."""
         app.require_login()
         model = model or _model_default(app, tier)
         backend = cloud.chat_backend(app, tier)
