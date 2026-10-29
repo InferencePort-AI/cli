@@ -55,6 +55,9 @@ def main() -> int:
         f"--output-filename={exe_name}",
         # the app and the libraries that load code/data dynamically
         "--include-package=ipx",
+        "--include-package=httptools",
+        "--include-package=ada_url",
+        "--include-module=pynvml",
         "--include-package=rich._unicode_data",
         "--include-package-data=certifi",
         "--include-package-data=rich",

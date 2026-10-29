@@ -28,6 +28,16 @@ class Fake:
             def _do(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length else b""
+                if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                    chunks = []
+                    while True:
+                        size = int(self.rfile.readline().split(b";", 1)[0], 16)
+                        if not size:
+                            self.rfile.readline()
+                            break
+                        chunks.append(self.rfile.read(size))
+                        assert self.rfile.read(2) == b"\r\n"
+                    raw = b"".join(chunks)
                 path = self.path.split("?", 1)[0]
                 rec = {"method": self.command, "path": path, "query": self.path.partition("?")[2], "headers": {k.lower(): v for k, v in self.headers.items()}, "raw": raw}
                 try:
@@ -46,16 +56,26 @@ class Fake:
                 elif isinstance(body, str):
                     data = body.encode()
                 else:
-                    data = body
+                    data = body if body is not None else b""
                 self.send_response(status)
                 for k, v in headers.items():
                     self.send_header(k, v)
-                self.send_header("Content-Length", str(len(data)))
+                streaming = not isinstance(data, bytes)
+                if streaming:
+                    self.send_header("Transfer-Encoding", "chunked")
+                else:
+                    self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 if self.command != "HEAD":
-                    self.wfile.write(data)
+                    if streaming:
+                        for chunk in data:
+                            self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                            self.wfile.flush()
+                        self.wfile.write(b"0\r\n\r\n")
+                    else:
+                        self.wfile.write(data)
 
-            do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _do
+            do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_TRACE = _do
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
