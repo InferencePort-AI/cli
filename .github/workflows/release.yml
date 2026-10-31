@@ -6,6 +6,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Run full release builds on branches without publishing any packages or releases.
+  workflow_dispatch:
+  # Exercise the previously failing ARM64 binary build on release-workflow PRs.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
@@ -18,7 +24,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python packaging/check_versions.py "${GITHUB_REF_NAME#v}"
+      - name: Verify versions
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python packaging/check_versions.py "${GITHUB_REF_NAME#v}"
+          else
+            python packaging/check_versions.py
+          fi
       - run: python -m pip install -e ".[dev]" && python -m pytest
 
   binaries:
@@ -28,14 +41,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { runner: windows-latest, target: windows-x64 }
-          - { runner: windows-11-arm, target: windows-arm64 }
-          - { runner: macos-15-intel, target: macos-x64 }
-          - { runner: macos-14, target: macos-arm64 }
-          # Build on the oldest supported runner so the binary runs on older glibc systems too.
-          - { runner: ubuntu-22.04, target: linux-x64 }
-          - { runner: ubuntu-22.04-arm, target: linux-arm64 }
+        # On PRs, validate Windows ARM64; tags and manual runs build all six targets.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"windows-11-arm","target":"windows-arm64"}]' || '[{"runner":"windows-latest","target":"windows-x64"},{"runner":"windows-11-arm","target":"windows-arm64"},{"runner":"macos-15-intel","target":"macos-x64"},{"runner":"macos-14","target":"macos-arm64"},{"runner":"ubuntu-22.04","target":"linux-x64"},{"runner":"ubuntu-22.04-arm","target":"linux-arm64"}]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,6 +51,25 @@ jobs:
       - name: Linux build dependencies
         if: startsWith(matrix.runner, 'ubuntu')
         run: sudo apt-get update && sudo apt-get install -y patchelf ccache
+      - name: Install OpenSSL for Windows ARM64
+        if: matrix.target == 'windows-arm64'
+        shell: pwsh
+        run: |
+          # cryptography needs a source build on win_arm64 and requires OpenSSL.
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
+          if (-not (Test-Path $vcpkg)) { throw "vcpkg not found at $vcpkg" }
+          & $vcpkg install "openssl:arm64-windows-static-md"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to install ARM64 OpenSSL via vcpkg" }
+          $opensslDir = Join-Path $vcpkgRoot "installed\arm64-windows-static-md"
+          if (-not (Test-Path (Join-Path $opensslDir "include\openssl\ssl.h"))) {
+            throw "ARM64 OpenSSL headers not found under $opensslDir"
+          }
+          "OPENSSL_DIR=$opensslDir" >> $env:GITHUB_ENV
+          "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+          "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
+          "VCPKGRS_TRIPLET=arm64-windows-static-md" >> $env:GITHUB_ENV
       - run: python -m pip install -e ".[build]"
       - run: python packaging/build_binary.py
       - name: Smoke test the compiled binary
@@ -60,6 +86,8 @@ jobs:
           if-no-files-found: error
 
   release:
+    # Branch-based manual builds are smoke tests only.
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: binaries
     runs-on: ubuntu-latest
     permissions:
