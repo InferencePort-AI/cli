@@ -30,7 +30,7 @@ def ssl_context() -> ssl.SSLContext:
         try:
             import certifi
 
-            _SSL = ssl.create_default_context(cafile=certifi.where())
+            _SSL = ssl.create_default_context(cafile=os.getenv("IPX_CA_BUNDLE") or certifi.where())
         except Exception:  # pragma: no cover - certifi missing or unreadable
             _SSL = ssl.create_default_context()
     return _SSL
@@ -332,6 +332,7 @@ class Transport:
         params: Optional[Dict[str, Any]] = None,
         form: Optional[Dict[str, Any]] = None,
         files: Optional[Dict[str, FileSpec]] = None,
+        data: Optional[bytes] = None,
         headers: Optional[Dict[str, str]] = None,
         auth: bool = True,
         org: bool = True,
@@ -341,8 +342,9 @@ class Transport:
         if auth:
             self.require_auth()
             self._maybe_refresh()
-        data: Optional[bytes] = None
         hdrs = dict(headers or {})
+        if data is not None and (json is not None or files is not None or form is not None):
+            raise IpxError("Raw data cannot be combined with JSON or form data.")
         if files is not None or form is not None:
             data, ctype = encode_multipart(form or {}, files or {})
             hdrs["Content-Type"] = ctype

@@ -29,5 +29,5 @@ def test_existing_commands_and_bucket_help_remain_registered(home):
     _register()
     assert {'bucket', 'auth', 'org', 'gen', 'p2g', 'model'} <= set(root.commands)
     result = CliRunner().invoke(root, ['bucket', '--help'])
-    assert result.exit_code == 0 and 'not available yet' in result.output
+    assert result.exit_code == 0 and 'Manage private Buckets' in result.output
     assert 'pricing' in result.output and 'status' in result.output
