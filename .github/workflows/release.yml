@@ -8,6 +8,10 @@ on:
     tags: ["v*"]
   # Run full release builds on branches without publishing any packages or releases.
   workflow_dispatch:
+  # Exercise the previously failing ARM64 binary build on release-workflow PRs.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
@@ -37,14 +41,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { runner: windows-latest, target: windows-x64 }
-          - { runner: windows-11-arm, target: windows-arm64 }
-          - { runner: macos-15-intel, target: macos-x64 }
-          - { runner: macos-14, target: macos-arm64 }
-          # Build on the oldest supported runner so the binary runs on older glibc systems too.
-          - { runner: ubuntu-22.04, target: linux-x64 }
-          - { runner: ubuntu-22.04-arm, target: linux-arm64 }
+        # On PRs, validate Windows ARM64; tags and manual runs build all six targets.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"windows-11-arm","target":"windows-arm64"}]' || '[{"runner":"windows-latest","target":"windows-x64"},{"runner":"windows-11-arm","target":"windows-arm64"},{"runner":"macos-15-intel","target":"macos-x64"},{"runner":"macos-14","target":"macos-arm64"},{"runner":"ubuntu-22.04","target":"linux-x64"},{"runner":"ubuntu-22.04-arm","target":"linux-arm64"}]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
