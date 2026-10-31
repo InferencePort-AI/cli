@@ -20,7 +20,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python packaging/check_versions.py "${GITHUB_REF_NAME#v}"
+      - name: Verify versions
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python packaging/check_versions.py "${GITHUB_REF_NAME#v}"
+          else
+            python packaging/check_versions.py
+          fi
       - run: python -m pip install -e ".[dev]" && python -m pytest
 
   binaries:
