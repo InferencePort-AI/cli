@@ -16,12 +16,12 @@ from ipx.clickx import IpxGroup
 from ipx.errors import IpxError
 
 
-@click.group("bucket", cls=IpxGroup, section="Cloud", short_help="Buckets availability and retail pricing")
+@click.group("bucket", cls=IpxGroup, section="Cloud", short_help="Buckets availability and pricing")
 def group() -> None:
     """Manage private Buckets, stream files and issue scoped S3 credentials.
 
     Uses your saved account and the global --org / --personal context.
-    Requires a server with Buckets beta access enabled.
+    Requires a server with Buckets enabled.
     """
 
 
@@ -55,7 +55,7 @@ def pricing(app: App) -> None:
         catalog = d.get("pricing") or {}
         ui.console.print(
             ui.kv_panel(
-                "Buckets retail catalog",
+                "Buckets pricing",
                 [
                     (
                         "Availability",
@@ -67,7 +67,7 @@ def pricing(app: App) -> None:
             )
         )
         if not catalog.get("meters"):
-            ui.console.print("No verified Azure retail rates are published yet.")
+            ui.console.print("Storage pricing is currently unavailable.")
 
     app.out(data, render)
 
@@ -135,7 +135,7 @@ def delete(app, name):
 @click.argument("name")
 @pass_app
 def usage(app, name):
-    """Read storage, Azure operation counters and settled costs."""
+    """Read storage, operation counters and settled costs."""
     bucket = lookup(app, name)
     output(app, app.api.get("/v1/buckets/" + bucket["id"] + "/usage"))
 
@@ -266,7 +266,7 @@ def download(app, name, key, destination):
 @click.argument("key")
 @pass_app
 def rm(app, name, key):
-    """Remove one object key; retained Azure versions can remain billable."""
+    """Remove one object key; retained versions can remain billable."""
     bucket = lookup(app, name)
     app.api.request("DELETE", target(bucket["name"], key))
     output(app, {"deleted": key})
