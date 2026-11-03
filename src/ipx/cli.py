@@ -49,6 +49,7 @@ def _register() -> None:
     from ipx.commands import (
         agent,
         auth,
+        bucket,
         config_cmd,
         featherless,
         gen,
@@ -64,7 +65,7 @@ def _register() -> None:
         usage,
     )
 
-    for mod in (auth, org, usage, p2g, gen, shield, featherless, agent, mcp, model, local, server, imports, config_cmd, misc):
+    for mod in (auth, bucket, org, usage, p2g, gen, shield, featherless, agent, mcp, model, local, server, imports, config_cmd, misc):
         for cmd in mod.COMMANDS if hasattr(mod, "COMMANDS") else [mod.group]:
             root.add_command(cmd)
 
