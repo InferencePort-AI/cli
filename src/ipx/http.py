@@ -27,13 +27,32 @@ _SSL: Optional[ssl.SSLContext] = None
 def ssl_context() -> ssl.SSLContext:
     global _SSL
     if _SSL is None:
-        try:
-            import certifi
+        bundle = os.getenv("IPX_CA_BUNDLE")
+        if bundle:
+            # An explicitly configured bundle is authoritative: never silently fall back to the
+            # default trust store when it is missing, unreadable or invalid.
+            try:
+                _SSL = ssl.create_default_context(cafile=bundle)
+            except (OSError, ssl.SSLError, ValueError) as e:
+                raise IpxError(
+                    f"Could not load the CA bundle configured by IPX_CA_BUNDLE: {e}",
+                    "Check that the file exists and contains valid PEM certificates.",
+                ) from e
+        else:
+            try:
+                import certifi
 
-            _SSL = ssl.create_default_context(cafile=os.getenv("IPX_CA_BUNDLE") or certifi.where())
-        except Exception:  # pragma: no cover - certifi missing or unreadable
-            _SSL = ssl.create_default_context()
+                _SSL = ssl.create_default_context(cafile=certifi.where())
+            except Exception:  # pragma: no cover - certifi missing or unreadable
+                _SSL = ssl.create_default_context()
     return _SSL
+
+
+def _origin(url: str) -> Tuple[str, str, Optional[int]]:
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    port = parts.port if parts.port is not None else {"http": 80, "https": 443}.get(scheme)
+    return scheme, (parts.hostname or "").lower(), port
 
 
 class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
@@ -54,8 +73,21 @@ class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
-def _opener(ctx: Optional[ssl.SSLContext]) -> urllib.request.OpenerDirector:
-    handlers: List[Any] = [_StripAuthOnCrossHostRedirect()]
+class _RejectCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects that leave the configured origin (used for bucket downloads)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if _origin(req.full_url) != _origin(newurl):
+            raise IpxError(
+                "Refusing to follow a redirect to a different origin while downloading.",
+                f"The service redirected from {urllib.parse.urlsplit(req.full_url).netloc} "
+                f"to {urllib.parse.urlsplit(newurl).netloc}.",
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener(ctx: Optional[ssl.SSLContext], *, same_origin_redirects: bool = False) -> urllib.request.OpenerDirector:
+    handlers: List[Any] = [_RejectCrossOriginRedirect() if same_origin_redirects else _StripAuthOnCrossHostRedirect()]
     if ctx is not None:
         handlers.append(urllib.request.HTTPSHandler(context=ctx))
     return urllib.request.build_opener(*handlers)
@@ -241,6 +273,7 @@ def raw_request(
     headers: Optional[Dict[str, str]] = None,
     timeout: float = 60.0,
     stream: bool = False,
+    same_origin_redirects: bool = False,
 ) -> Union[Response, StreamResponse]:
     hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     hdrs.update(headers or {})
@@ -251,7 +284,7 @@ def raw_request(
     req = urllib.request.Request(url, data=body, headers=hdrs, method=method.upper())
     ctx = ssl_context() if url.lower().startswith("https") else None
     try:
-        resp = _opener(ctx).open(req, timeout=timeout)
+        resp = _opener(ctx, same_origin_redirects=same_origin_redirects).open(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         payload = e.read() if e.fp else b""
         raise api_error(e.code, payload, {k.lower(): v for k, v in e.headers.items()})
@@ -338,6 +371,7 @@ class Transport:
         org: bool = True,
         timeout: float = 120.0,
         stream: bool = False,
+        same_origin_redirects: bool = False,
     ) -> Union[Response, StreamResponse]:
         if auth:
             self.require_auth()
@@ -354,7 +388,7 @@ class Transport:
         for attempt in (0, 1):
             try:
                 return raw_request(method, url, json=json, data=data, headers=self._headers(auth, org, hdrs),
-                                   timeout=timeout, stream=stream)
+                                   timeout=timeout, stream=stream, same_origin_redirects=same_origin_redirects)
             except ApiError as e:
                 if e.status == 401 and attempt == 0 and auth and self.refresher and self.creds.data.get("refresh_token"):
                     if self.refresher(self.cfg, self.creds):
