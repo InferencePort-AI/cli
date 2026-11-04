@@ -102,9 +102,14 @@ def test_download_discards_a_truncated_file(monkeypatch, home, tmp_path):
             pass
 
     def get(self, path, **kwargs):
+        if path == "/v1/buckets/workspace":
+            owner = "11111111-1111-4111-8111-111111111111"
+            return {"owner_kind": "user", "owner_id": owner,
+                    "endpoint": f"https://api.inferenceport.ai/{owner}/s3/"}
         return {"buckets": [{"id": "b1", "name": "bucket"}]}
 
     def request(self, method, path, **kwargs):
+        assert path == "https://api.inferenceport.ai/11111111-1111-4111-8111-111111111111/s3/bucket/key"
         assert kwargs.get("same_origin_redirects") is True
         assert kwargs.get("timeout") == 600.0
         return StreamResponse(Raw(), 200, {"content-length": "10"})
