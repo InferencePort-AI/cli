@@ -37,6 +37,9 @@ def test_full_cli_bucket_lifecycle_and_private_credential_file(tmp_path):
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
+    receipt = cli("bucket", "connection")
+    assert receipt["owner_kind"] == "user"
+    assert f"/{receipt['owner_id']}/s3/" in receipt["endpoint"]
     name = "cli-e2e-" + uuid4().hex[:12]
     cli("bucket", "create", name)
     assert cli("bucket", "info", name)["name"] == name
@@ -46,16 +49,23 @@ def test_full_cli_bucket_lifecycle_and_private_credential_file(tmp_path):
         cli("bucket", "upload", name, str(source), "--key", "models/模型//../literal%2Fkey")["bytes"]
         == source.stat().st_size
     )
+    renamed = name + "-edited"
+    updated = cli("bucket", "update", name, "--name", renamed, "--quota-bytes", "1073741824")
+    assert updated["name"] == renamed and updated["quota_bytes"] == 1073741824
+    name = renamed
     assert cli("bucket", "ls", name, "--prefix", "models/")["objects"]
     destination = tmp_path / "download.bin"
     cli("bucket", "download", name, "models/模型//../literal%2Fkey", str(destination))
     assert destination.read_bytes() == source.read_bytes()
+    if os.name == "posix":
+        assert destination.stat().st_mode & 0o777 == 0o600
     assert cli("bucket", "usage", name)["meters"]
     credential_file = tmp_path / "s3-credential.json"
     result = cli("bucket", "credentials", "create", "--read-only", "--output", str(credential_file))
     assert credential_file.stat().st_mode & 0o777 == 0o600
     assert "secret_access_key" not in result
     saved = json.loads(credential_file.read_text())
+    assert saved["endpoint"] == receipt["endpoint"]
     rotated_file = tmp_path / "rotated.json"
     rotated = cli(
         "bucket", "credentials", "rotate", saved["id"], "--revoke-previous", "--output", str(rotated_file)
