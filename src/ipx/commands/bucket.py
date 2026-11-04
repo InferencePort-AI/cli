@@ -8,6 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+from uuid import UUID, uuid4
 from xml.etree.ElementTree import fromstring
 
 import click
@@ -244,8 +245,63 @@ def _report_object(app, key, size, obj):
     output(app, {"key": key, "bytes": obj.get("size", size), "etag": obj.get("etag")})
 
 
-def target(name, key=""):
-    return "/s3/" + quote(name, safe="") + ("/" + quote(key, safe="").replace(".", "%2E") if key else "")
+@group.command("connection")
+@pass_app
+def connection(app: App) -> None:
+    """Show the S3 endpoint for your selected personal or organization workspace."""
+    output(app, workspace_info(app))
+
+
+def workspace_info(app):
+    try:
+        data = app.api.get("/v1/buckets/workspace")
+    except ApiError as error:
+        if error.status in {404, 405, 501}:
+            raise IpxError(
+                "This server does not support workspace S3 connection discovery.",
+                "Upgrade the API server before using workspace bucket commands, or check your API base URL.",
+            ) from error
+        raise
+    try:
+        if not isinstance(data, dict):
+            raise ValueError()
+        identifier = str(UUID(data["owner_id"]))
+    except (KeyError, ValueError, TypeError, AttributeError) as error:
+        raise IpxError("The server returned an invalid workspace ID.", "Check the API server configuration.") from error
+    return {**data, "owner_id": identifier}
+
+
+def target(app, name, key=""):
+    """Use the authenticated API's advertised S3 origin, not the CLI API origin.
+
+    The origin can be a separate storage host. Reject credential-bearing URLs with
+    userinfo, a mismatched workspace path, or plaintext non-loopback HTTP.
+    """
+    workspace = workspace_info(app)
+    identifier = workspace["owner_id"]
+    try:
+        endpoint = workspace["endpoint"]
+        parsed = urlsplit(endpoint)
+        if (
+            not isinstance(endpoint, str)
+            or not parsed.netloc
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path != f"/{identifier}/s3/"
+            or parsed.scheme not in {"https", "http"}
+            or (parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"})
+        ):
+            raise ValueError("Invalid S3 endpoint")
+        _ = parsed.port  # Reject invalid ports before sending the bearer credential.
+    except (KeyError, ValueError, TypeError, AttributeError) as error:
+        raise IpxError(
+            "The server returned an invalid workspace S3 endpoint.",
+            "Check the authenticated API's storage endpoint configuration.",
+        ) from error
+    return endpoint + quote(name, safe="") + ("/" + quote(key, safe="").replace(".", "%2E") if key else "")
 
 
 @group.command("create")
@@ -255,6 +311,21 @@ def target(name, key=""):
 def create(app, name, quota_bytes):
     """Create a logical bucket in the active workspace."""
     output(app, app.api.post("/v1/buckets", {"name": name, "quota_bytes": quota_bytes}))
+
+
+@group.command("update")
+@click.argument("name")
+@click.option("--name", "new_name", help="Rename the bucket; update S3 clients to the new name.")
+@click.option("--quota-bytes", type=click.IntRange(1, 1024**4), help="Maximum logical size, including active upload reservations.")
+@click.option("--status", type=click.Choice(["active", "read_only"]), help="Allow or pause new uploads.")
+@pass_app
+def update(app, name, new_name, quota_bytes, status):
+    """Change a bucket's name, maximum size or upload status without losing objects."""
+    changes = {k: v for k, v in {"name": new_name, "quota_bytes": quota_bytes, "status": status}.items() if v is not None}
+    if not changes:
+        raise IpxError("Specify --name, --quota-bytes or --status.")
+    bucket = lookup(app, name)
+    output(app, app.api.patch("/v1/buckets/" + bucket["id"], changes))
 
 
 @group.command("list")
@@ -330,7 +401,7 @@ def upload(app, name, file, key):
 
     bucket = lookup(app, name)
     key = key or file.name
-    path = target(bucket["name"], key)
+    path = target(app, bucket["name"], key)
     size = file.stat().st_size
     chunk_size = _part_size(size)
 
@@ -462,7 +533,7 @@ def download(app, name, key, destination):
     bucket = lookup(app, name)
     response = app.api.request(
         "GET",
-        target(bucket["name"], key),
+        target(app, bucket["name"], key),
         stream=True,
         headers={"Accept": "application/octet-stream"},
         timeout=TRANSFER_TIMEOUT,
@@ -472,9 +543,12 @@ def download(app, name, key, destination):
     expected = int(advertised) if advertised and advertised.isdigit() else None
     written = 0
     created = False
+    fd = None
     try:
-        with destination.open("xb") as file:
-            created = True
+        fd = _reserve_private_file(destination)
+        created = True
+        with os.fdopen(fd, "wb") as file:
+            fd = None
             for chunk in response.iter_bytes():
                 file.write(chunk)
                 written += len(chunk)
@@ -484,6 +558,8 @@ def download(app, name, key, destination):
                 "The object may be truncated; retry the download.",
             )
     except BaseException:
+        if fd is not None:
+            _close_fd(fd)
         if created:
             destination.unlink(missing_ok=True)
         raise
@@ -499,7 +575,7 @@ def download(app, name, key, destination):
 def rm(app, name, key):
     """Remove one object key; retained versions can remain billable."""
     bucket = lookup(app, name)
-    app.api.request("DELETE", target(bucket["name"], key))
+    app.api.request("DELETE", target(app, bucket["name"], key))
     output(app, {"deleted": key})
 
 
@@ -514,7 +590,22 @@ def credential_list(app):
     output(app, app.api.get("/v1/buckets/s3-credentials"))
 
 
+def credential_request(app, path, body, request_id):
+    for attempt in range(2):
+        try:
+            return app.api.post(path, body, headers={"Idempotency-Key": request_id})
+        except IpxError as error:
+            if isinstance(error, ApiError) and error.status < 500:
+                raise
+            if attempt:
+                raise IpxError(
+                    "The credential response was lost; the request may have committed.",
+                    f"Retry the same command/options with --request-id {request_id} within 10 minutes, or review the credential list.",
+                ) from error
+
+
 @credentials.command("create")
+@click.option("--request-id", type=click.UUID, help="Reuse a previous request UUID after a lost response.")
 @click.option("--read-only", is_flag=True)
 @click.option("--bucket-id", multiple=True)
 @click.option("--prefix", multiple=True)
@@ -527,12 +618,14 @@ def credential_list(app):
     help="New private JSON file for the reveal-once secret.",
 )
 @pass_app
-def credential_create(app, read_only, bucket_id, prefix, expires_in, destination):
-    # Reserve the private file before issuance, so an existing file never loses a secret.
+def credential_create(app, read_only, bucket_id, prefix, expires_in, destination, request_id):
+    """Save a reveal-once credential; network retries reuse a bounded UUID intent."""
+    intent = str(request_id or uuid4())
     _save_credential(
         app,
         destination,
-        lambda: app.api.post(
+        lambda: credential_request(
+            app,
             "/v1/buckets/s3-credentials",
             {
                 "permissions": ["storage.read"] if read_only else ["storage.read", "storage.write"],
@@ -540,6 +633,7 @@ def credential_create(app, read_only, bucket_id, prefix, expires_in, destination
                 "key_prefixes": list(prefix) or None,
                 "expires_in": expires_in,
             },
+            intent,
         ),
         lambda data: {"id": data["id"], "saved_to": str(destination), "expires_at": data["expires_at"]},
         revoke_on_failure=True,
@@ -547,6 +641,7 @@ def credential_create(app, read_only, bucket_id, prefix, expires_in, destination
 
 
 @credentials.command("rotate")
+@click.option("--request-id", type=click.UUID, help="Reuse a previous request UUID after a lost response.")
 @click.argument("identifier")
 @click.option(
     "--revoke-previous",
@@ -555,14 +650,17 @@ def credential_create(app, read_only, bucket_id, prefix, expires_in, destination
 )
 @click.option("--output", "destination", required=True, type=click.Path(dir_okay=False, path_type=Path))
 @pass_app
-def credential_rotate(app, identifier, revoke_previous, destination):
-    """Save a reveal-once replacement with the same permissions and bucket scopes."""
+def credential_rotate(app, identifier, revoke_previous, destination, request_id):
+    """Rotate a key while preserving secure file handling and bounded retries."""
+    intent = str(request_id or uuid4())
     _save_credential(
         app,
         destination,
-        lambda: app.api.post(
+        lambda: credential_request(
+            app,
             "/v1/buckets/s3-credentials/" + quote(identifier, safe="") + "/rotate",
             {"revoke_previous": revoke_previous},
+            intent,
         ),
         lambda data: {
             "id": data["id"],
