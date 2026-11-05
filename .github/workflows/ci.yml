@@ -17,6 +17,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.9", "3.12", "3.13"]
+        # Ubuntu 26.04 has no setup-python 3.9 distribution. Keep the supported
+        # Python 3.9 job on its last compatible runner instead of dropping coverage.
+        exclude:
+          - os: ubuntu-latest
+            python: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python: "3.9"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

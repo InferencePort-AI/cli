@@ -198,7 +198,7 @@ def test_existing_commands_and_bucket_help_remain_registered(home):
     _register()
     assert {"bucket", "auth", "org", "gen", "p2g", "model"} <= set(root.commands)
     result = CliRunner().invoke(root, ["bucket", "--help"])
-    assert result.exit_code == 0 and "Manage private Buckets" in result.output
+    assert result.exit_code == 0 and "Manage Buckets" in result.output
     assert "pricing" in result.output and "status" in result.output
 
 
@@ -331,3 +331,33 @@ def test_credential_network_retry_reuses_intent_without_retrying_authorization()
     app.api.post = forbidden
     with pytest.raises(ApiError, match="Denied"):
         credential_request(app, "/issue", {}, key)
+
+
+def test_bucket_public_access_and_urls_preserve_org_context(monkeypatch, home):
+    calls = []
+    def get(self, path, **kwargs):
+        assert self.org == "acme"
+        if path.endswith("/objects"):
+            return {"objects": [{"object_key": "a/../模型", "public_url": "https://api.example.test/public/buckets/b/object?key=a%2F..%2F%E6%A8%A1%E5%9E%8B"}]}
+        return {"buckets": [{"id": "b", "name": "weights", "visibility": "public"}]}
+    def post(self, path, body, **kwargs):
+        calls.append((self.org, path, body)); return body
+    def patch(self, path, body, **kwargs):
+        calls.append((self.org, path, body)); return body
+    monkeypatch.setattr(Transport, "get", get)
+    monkeypatch.setattr(Transport, "post", post)
+    monkeypatch.setattr(Transport, "patch", patch)
+    _register()
+    runner = CliRunner()
+    for args in [["create", "weights", "--visibility", "public"], ["update", "weights", "--visibility", "private"], ["public-url", "weights", "a/../模型"]]:
+        result = runner.invoke(root, hoist_globals(["bucket", *args, "--org", "acme", "--json"]))
+        assert result.exit_code == 0, result.output
+    assert calls == [("acme", "/v1/buckets", {"name": "weights", "quota_bytes": 10 * 1024**3, "visibility": "public"}), ("acme", "/v1/buckets/b", {"visibility": "private"})]
+    assert json.loads(result.output)["public_url"].startswith("https://api.example.test/public/")
+
+
+def test_public_url_refuses_private_bucket(monkeypatch, home):
+    monkeypatch.setattr(Transport, "get", lambda *a, **kw: {"buckets": [{"id": "b", "name": "weights", "visibility": "private"}]})
+    _register()
+    result = CliRunner().invoke(root, ["bucket", "public-url", "weights", "file"])
+    assert result.exit_code != 0 and "private" in str(result.exception)

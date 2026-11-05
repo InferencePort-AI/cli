@@ -25,7 +25,7 @@ TRANSFER_TIMEOUT = 600.0
 
 @click.group("bucket", cls=IpxGroup, section="Cloud", short_help="Buckets availability and pricing")
 def group() -> None:
-    """Manage private Buckets, stream files and issue scoped S3 credentials.
+    """Manage Buckets, stream files and issue scoped S3 credentials.
 
     Uses your saved account and the global --org / --personal context.
     Requires a server with Buckets enabled.
@@ -224,7 +224,7 @@ def _find_object(app, bucket, key):
             params={"prefix": key, "max_keys": 1000, "continuation_token": token},
         )
         for obj in page.get("objects") or []:
-            if obj.get("key") == key:
+            if obj.get("object_key", obj.get("key")) == key:
                 return obj
         token = page.get("continuation_token")
         if not token:
@@ -307,10 +307,11 @@ def target(app, name, key=""):
 @group.command("create")
 @click.argument("name")
 @click.option("--quota-bytes", type=click.IntRange(1, 1024**4), default=10 * 1024**3)
+@click.option("--visibility", type=click.Choice(["private", "public"]), default="private", show_default=True)
 @pass_app
-def create(app, name, quota_bytes):
+def create(app, name, quota_bytes, visibility):
     """Create a logical bucket in the active workspace."""
-    output(app, app.api.post("/v1/buckets", {"name": name, "quota_bytes": quota_bytes}))
+    output(app, app.api.post("/v1/buckets", {"name": name, "quota_bytes": quota_bytes, "visibility": visibility}))
 
 
 @group.command("update")
@@ -318,12 +319,13 @@ def create(app, name, quota_bytes):
 @click.option("--name", "new_name", help="Rename the bucket; update S3 clients to the new name.")
 @click.option("--quota-bytes", type=click.IntRange(1, 1024**4), help="Maximum logical size, including active upload reservations.")
 @click.option("--status", type=click.Choice(["active", "read_only"]), help="Allow or pause new uploads.")
+@click.option("--visibility", type=click.Choice(["private", "public"]), help="Public allows anyone with a file URL to download; transfer is billed to this workspace.")
 @pass_app
-def update(app, name, new_name, quota_bytes, status):
+def update(app, name, new_name, quota_bytes, status, visibility):
     """Change a bucket's name, maximum size or upload status without losing objects."""
-    changes = {k: v for k, v in {"name": new_name, "quota_bytes": quota_bytes, "status": status}.items() if v is not None}
+    changes = {k: v for k, v in {"name": new_name, "quota_bytes": quota_bytes, "status": status, "visibility": visibility}.items() if v is not None}
     if not changes:
-        raise IpxError("Specify --name, --quota-bytes or --status.")
+        raise IpxError("Specify --name, --quota-bytes, --status or --visibility.")
     bucket = lookup(app, name)
     output(app, app.api.patch("/v1/buckets/" + bucket["id"], changes))
 
@@ -343,6 +345,21 @@ def list_buckets(app, continuation_token, limit):
 def info(app, name):
     """Show bucket metadata and quota."""
     output(app, lookup(app, name))
+
+
+@group.command("public-url")
+@click.argument("name")
+@click.argument("key")
+@pass_app
+def public_url(app, name, key):
+    """Show a public file URL. The bucket must already be public."""
+    bucket = lookup(app, name)
+    if bucket.get("visibility") != "public":
+        raise IpxError("This bucket is private.", "Use bucket update NAME --visibility public only if its files may be shared.")
+    obj = _find_object(app, bucket, key)
+    if not obj or not obj.get("public_url"):
+        raise IpxError("No public URL is available for this object.")
+    output(app, {"public_url": obj["public_url"]})
 
 
 @group.command("delete")
