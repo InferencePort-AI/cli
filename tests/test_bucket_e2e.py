@@ -2,9 +2,12 @@
 
 import json
 import os
+import ssl
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import pytest
@@ -59,6 +62,15 @@ def test_full_cli_bucket_lifecycle_and_private_credential_file(tmp_path):
     assert destination.read_bytes() == source.read_bytes()
     if os.name == "posix":
         assert destination.stat().st_mode & 0o777 == 0o600
+    assert cli("bucket", "update", name, "--visibility", "public")["visibility"] == "public"
+    shared = cli("bucket", "public-url", name, "models/模型//../literal%2Fkey")["public_url"]
+    tls = ssl.create_default_context(cafile=str(work / "localhost.pem"))
+    with urllib.request.urlopen(urllib.request.Request(shared, headers={"Range": "bytes=0-15"}), context=tls) as response:
+        assert response.status == 206 and response.read() == source.read_bytes()[:16]
+    cli("bucket", "update", name, "--visibility", "private")
+    with pytest.raises(HTTPError) as error:
+        urllib.request.urlopen(shared, context=tls)
+    assert error.value.code == 404
     assert cli("bucket", "usage", name)["meters"]
     credential_file = tmp_path / "s3-credential.json"
     result = cli("bucket", "credentials", "create", "--read-only", "--output", str(credential_file))
