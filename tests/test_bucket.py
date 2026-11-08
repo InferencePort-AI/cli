@@ -361,3 +361,13 @@ def test_public_url_refuses_private_bucket(monkeypatch, home):
     _register()
     result = CliRunner().invoke(root, ["bucket", "public-url", "weights", "file"])
     assert result.exit_code != 0 and "private" in str(result.exception)
+
+
+def test_public_url_help_cautions_about_bucket_policy_denies(home):
+    _register()
+    result = CliRunner().invoke(root, ["bucket", "public-url", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "policy Deny" in result.output
+    result = CliRunner().invoke(root, ["bucket", "update", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "Private blocks anonymous policy grants" in result.output
