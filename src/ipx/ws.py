@@ -200,7 +200,16 @@ def connect(url: str, *, headers: Optional[Dict[str, str]] = None, subprotocol: 
 
     try:
         raw = socket.create_connection((host, port), timeout=timeout)
-        sock: socket.socket = ssl_context().wrap_socket(raw, server_hostname=host) if secure else raw
+        if secure:
+            ctx = ssl_context()
+            if hasattr(ctx, "minimum_version") and hasattr(ssl, "TLSVersion"):
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            else:
+                ctx.options |= getattr(ssl, "OP_NO_TLSv1", 0)
+                ctx.options |= getattr(ssl, "OP_NO_TLSv1_1", 0)
+            sock: socket.socket = ctx.wrap_socket(raw, server_hostname=host)
+        else:
+            sock = raw
     except (OSError, ssl.SSLError) as e:
         raise IpxError(f"Could not connect to {host}:{port}.", str(e))
 

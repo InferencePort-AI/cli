@@ -52,6 +52,48 @@ def test_authorization_not_forwarded_to_other_host():
         target.shutdown()
 
 
+def test_same_origin_redirects_reject_a_different_host():
+    class Target(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    target = _serve(Target)
+
+    class Origin(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://localhost:{target.server_port}/x")
+            self.end_headers()
+
+    origin = _serve(Origin)
+    try:
+        with pytest.raises(IpxError, match="different origin"):
+            raw_request(
+                "GET", f"http://127.0.0.1:{origin.server_port}/", same_origin_redirects=True
+            )
+    finally:
+        origin.shutdown()
+        target.shutdown()
+
+
+def test_explicit_ca_bundle_errors_are_not_silenced(monkeypatch):
+    from ipx import http
+
+    monkeypatch.setenv("IPX_CA_BUNDLE", "/nonexistent/ipx-ca.pem")
+    monkeypatch.setattr(http, "_SSL", None)
+    with pytest.raises(IpxError, match="IPX_CA_BUNDLE"):
+        http.ssl_context()
+
+
 def test_connection_reset_mid_stream_is_ipx_error():
     from ipx.http import StreamResponse
 
