@@ -319,10 +319,10 @@ def create(app, name, quota_bytes, visibility):
 @click.option("--name", "new_name", help="Rename the bucket; update S3 clients to the new name.")
 @click.option("--quota-bytes", type=click.IntRange(1, 1024**4), help="Maximum logical size, including active upload reservations.")
 @click.option("--status", type=click.Choice(["active", "read_only"]), help="Allow or pause new uploads.")
-@click.option("--visibility", type=click.Choice(["private", "public"]), help="Public allows anyone with a file URL to download; transfer is billed to this workspace.")
+@click.option("--visibility", type=click.Choice(["private", "public"]), help="Private blocks anonymous policy grants; public links may still be denied by bucket policies. Downloads are billed to this workspace.")
 @pass_app
 def update(app, name, new_name, quota_bytes, status, visibility):
-    """Change a bucket's name, maximum size or upload status without losing objects."""
+    """Change name, quota, upload status or public visibility without losing objects."""
     changes = {k: v for k, v in {"name": new_name, "quota_bytes": quota_bytes, "status": status, "visibility": visibility}.items() if v is not None}
     if not changes:
         raise IpxError("Specify --name, --quota-bytes, --status or --visibility.")
@@ -352,7 +352,7 @@ def info(app, name):
 @click.argument("key")
 @pass_app
 def public_url(app, name, key):
-    """Show a public file URL. The bucket must already be public."""
+    """Show an anonymous URL for a public bucket; policy Deny can still restrict access."""
     bucket = lookup(app, name)
     if bucket.get("visibility") != "public":
         raise IpxError("This bucket is private.", "Use bucket update NAME --visibility public only if its files may be shared.")
